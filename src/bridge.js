@@ -24,13 +24,18 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 import { toWire, toWireTools, finishMap, toOpenAIUsage } from "./translate.js"
+import { classifyPlan, fetchPlanId } from "./plan.js"
+import { findAvailablePort, writeState, clearState, isServing, localAddresses, DEFAULT_PORT } from "./port.js"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, "..")
 
 // ------------------------------------------------------------------ config
 
-const PORT = Number(process.env.CMD_BRIDGE_PORT || 8787)
+// Resolved at startup: the preferred port if it is free, otherwise the next
+// free port above it. Mutated by resolvePort() before the server listens.
+let PORT = Number(process.env.CMD_BRIDGE_PORT || DEFAULT_PORT)
+let PORT_STRATEGY = "preferred"
 const HOST = process.env.CMD_BRIDGE_HOST || "127.0.0.1"
 const API_BASE = process.env.CMD_API_BASE || "https://api.commandcode.ai"
 const AUTH_PATH = process.env.CMD_AUTH_PATH || path.join(os.homedir(), ".commandcode", "auth.json")
@@ -358,25 +363,70 @@ function modelsPayload() {
   }
 }
 
-async function health() {
-  let upstream = { reachable: false }
+// Upstream status is cached because it costs two network round-trips, and
+// /health is polled by the CLI, the plugin and the installer. Doing that work
+// inline made /health slow enough that callers with a short timeout reported
+// a healthy bridge as "unreachable".
+let upstreamCache = { at: 0, value: null }
+const UPSTREAM_TTL_MS = 30_000
+
+async function upstreamStatus({ force = false } = {}) {
+  const now = Date.now()
+  if (!force && upstreamCache.value && now - upstreamCache.at < UPSTREAM_TTL_MS) {
+    return upstreamCache.value
+  }
+  let value
   try {
     const r = await fetch(API_BASE + "/alpha/whoami", {
       headers: { Authorization: `Bearer ${readApiKey()}`, "x-command-code-version": cliVersion() },
+      signal: AbortSignal.timeout(4000),
     })
     const j = await r.json().catch(() => ({}))
-    upstream = { reachable: !!j?.success, plan: j?.org?.planId ?? null, user: j?.user?.userName ?? null }
+    let plan = j?.org?.planId ?? null
+    if (j?.success && !plan) {
+      plan = await fetchPlanId({ apiBase: API_BASE, apiKey: readApiKey(), cliVersion: cliVersion() })
+    }
+    value = { reachable: !!j?.success, user: j?.user?.userName ?? null, plan }
   } catch (e) {
-    upstream = { reachable: false, error: e.message }
+    value = { reachable: false, user: null, plan: null, error: e.message }
   }
+  upstreamCache = { at: now, value }
+  return value
+}
+
+/**
+ * /health is deliberately fast and dependency-free: it answers from local
+ * state immediately and never blocks on the network. Pass ?deep=1 to force a
+ * fresh upstream check when you actually want one.
+ */
+async function health(url) {
+  const deep = url?.searchParams?.get("deep") === "1"
+  // A cold cache must not make /health slow: start the fetch, answer from
+  // whatever we know, and let the next poll see the result. Otherwise every
+  // caller with a short timeout reports a perfectly healthy bridge as dead.
+  if (!deep && !upstreamCache.value) upstreamStatus().catch(() => {})
+  const up = deep
+    ? await upstreamStatus({ force: true })
+    : upstreamCache.value || { reachable: null, user: null, plan: null, pending: true }
   return {
-    ok: upstream.reachable,
-    bridge: "opencode-commandcode",
+    ok: true,
+    bridge: "opencode-commandcode-go",
     port: PORT,
+    host: HOST,
+    baseURL: `http://${HOST}:${PORT}/v1`,
     cliVersion: cliVersion(),
     catalog: { models: (CATALOG.models || []).length, generatedAt: CATALOG.generatedAt },
     schema: { paths: Object.keys(SCHEMA.paths || {}).length, generatedAt: SCHEMA.generatedAt },
-    upstream: { base: API_BASE, ...upstream },
+    plan: { id: up.plan, ...classifyPlan(up.plan) },
+    upstream: {
+      base: API_BASE,
+      reachable: up.reachable,
+      user: up.user,
+      ...(up.pending ? { pending: true } : {}),
+      ...(up.error ? { error: up.error } : {}),
+    },
+    upstreamCheckedAt: upstreamCache.value ? new Date(upstreamCache.at).toISOString() : null,
+    upstreamFresh: Date.now() - upstreamCache.at < UPSTREAM_TTL_MS,
   }
 }
 
@@ -389,9 +439,9 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "application/json" })
       return res.end(JSON.stringify(modelsPayload()))
     }
-    if (req.method === "GET" && p === "/health") {
+    if (req.method === "GET" && (p === "/health" || p === "/v1/health")) {
       res.writeHead(200, { "content-type": "application/json" })
-      return res.end(JSON.stringify(await health()))
+      return res.end(JSON.stringify(await health(url)))
     }
     if (req.method === "GET" && p === "/__introspect") {
       res.writeHead(200, { "content-type": "application/json" })
@@ -434,52 +484,51 @@ export { buildEnvelope, buildConfig, modelsPayload }
 // CMD_BRIDGE_NO_LISTEN=1 imports the module as a library (tests, tooling)
 // without binding a port.
 if (process.env.CMD_BRIDGE_NO_LISTEN !== "1") {
-  // A previous instance may still hold the port -- especially one that is hung
-  // rather than serving. Crashing with an unhandled 'error' event is the worst
-  // outcome here: the caller sees nothing useful and the port stays occupied.
-  server.on("error", async (err) => {
+  // Port collisions are the single most common way a local proxy fails to
+  // start, and the fix should never be "go find a free port yourself". Scan
+  // upward, then persist the choice so the installer, plugin and CLI all find
+  // the bridge where it actually is.
+  const chosen = await findAvailablePort({ start: Number(process.env.CMD_BRIDGE_PORT || DEFAULT_PORT), host: HOST })
+  PORT = chosen.port
+  PORT_STRATEGY = chosen.strategy
+
+  server.on("error", (err) => {
     if (err.code === "EADDRINUSE") {
-      // If something healthy already answers, this is a duplicate start and
-      // exiting 0 is correct -- the supervisor will find the live instance.
-      const ac = new AbortController()
-      const t = setTimeout(() => ac.abort(), 1500)
-      try {
-        const r = await fetch(`http://${HOST}:${PORT}/health`, { signal: ac.signal })
-        clearTimeout(t)
-        if (r.ok) {
-          process.stderr.write(
-            `opencode-commandcode bridge already running on http://${HOST}:${PORT}\n`,
-          )
-          process.exit(0)
-        }
-      } catch {
-        /* nothing healthy is listening -- fall through and report */
-      }
       process.stderr.write(
-        `port ${PORT} is held by a process that is not serving this bridge.\n` +
-          `  find it:  lsof -ti:${PORT}\n` +
-          `  clear it:  lsof -ti:${PORT} | xargs kill -9\n` +
-          `  or use another port:  CMD_BRIDGE_PORT=8788 npm run bridge\n`,
+        `port ${PORT} was taken between the scan and the bind.\n` +
+          `  retry:  opencode-cc-go start\n` +
+          `  or pin a port:  CMD_BRIDGE_PORT=8788 opencode-cc-go start\n`,
       )
       process.exit(1)
     }
     if (err.code === "EACCES") {
-      process.stderr.write(`not permitted to bind ${HOST}:${PORT} (try a port above 1024)\n`)
+      process.stderr.write(`not permitted to bind ${HOST}:${PORT} (use a port above 1024)\n`)
       process.exit(1)
     }
     process.stderr.write(`bridge server error: ${err.message}\n`)
     process.exit(1)
   })
 
-  // A hung upstream or socket must not take the process down silently.
   process.on("unhandledRejection", (e) => {
     process.stderr.write(`bridge: unhandled rejection: ${e?.message || e}\n`)
   })
 
+  const shutdown = (sig) => {
+    process.stderr.write(`\nbridge stopping (${sig})\n`)
+    clearState()
+    try { server.close() } catch {}
+    process.exit(0)
+  }
+  process.on("SIGINT", () => shutdown("SIGINT"))
+  process.on("SIGTERM", () => shutdown("SIGTERM"))
+  process.on("exit", () => clearState())
+
   server.listen(PORT, HOST, () => {
+    writeState({ port: PORT, host: HOST, pid: process.pid, cliVersion: cliVersion() })
+    const extra = PORT_STRATEGY === "preferred" ? "" : `  [port ${PORT} chosen: ${PORT_STRATEGY}]`
     process.stderr.write(
-      `opencode-commandcode bridge on http://${HOST}:${PORT}  ` +
-        `(${(CATALOG.models || []).length} models, cli ${cliVersion()})\n`,
+      `opencode-commandcode-go bridge on http://${HOST}:${PORT}  ` +
+        `(${(CATALOG.models || []).length} models, cli ${cliVersion()})${extra}\n`,
     )
   })
 }

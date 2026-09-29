@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * opencode-commandcode CLI
+ * opencode-cc-go CLI
  *
  *   status              show bridge health, plan, credits and model count
  *   doctor              diagnose a broken install (key, node, port, catalog)
@@ -20,8 +20,18 @@ import { fileURLToPath } from "node:url"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, "..")
-const PORT = Number(process.env.CMD_BRIDGE_PORT || 8787)
 const HOST = process.env.CMD_BRIDGE_HOST || "127.0.0.1"
+
+// The bridge auto-selects a free port, so never assume 8787 -- ask. Resolved
+// before any route is contacted.
+let PORT = Number(process.env.CMD_BRIDGE_PORT || 8787)
+{
+  const { discoverPort } = await import(new URL("../src/port.js", import.meta.url).href)
+  if (!process.env.CMD_BRIDGE_PORT) {
+    const found = await discoverPort({ host: HOST })
+    if (found) PORT = found.port
+  }
+}
 
 const read = (n, f) => {
   try { const p = path.join(REPO, n); return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : f }
@@ -35,7 +45,7 @@ const c = { b: (s) => `\x1b[1m${s}\x1b[0m`, g: (s) => `\x1b[32m${s}\x1b[0m`, r: 
 
 async function health() {
   try {
-    const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 3000)
+    const ac = new AbortController(); const t = setTimeout(() => ac.abort(), 2500)
     const r = await fetch(`http://${HOST}:${PORT}/health`, { signal: ac.signal }); clearTimeout(t)
     return await r.json()
   } catch { return null }
@@ -59,7 +69,16 @@ const flag = (n) => process.argv.includes(n)
 
 if (cmd === "status" || cmd === "doctor") {
   const h = await health()
-  console.log(c.b("opencode-commandcode"))
+  console.log(c.b("opencode-cc-go"))
+  if (h?.plan) {
+    const p = h.plan
+    const line = p.needsBridge === true
+      ? `${c.g("Go ($1)")} ${c.d("(needs this bridge - no Provider API)")}`
+      : p.needsBridge === false
+        ? `${c.y(p.label)} ${c.d("(already has API access - you do not need this bridge)")}`
+        : `${c.d(p.id || "unknown plan")}`
+    console.log(`  plan          ${line}`)
+  }
   console.log(`  bridge        ${h ? c.g("healthy") : c.r("unreachable")}  (http://${HOST}:${PORT})`)
   if (h) {
     console.log(`  upstream      ${h.upstream?.reachable ? c.g("reachable") : c.r("unreachable")}  ${c.d(h.upstream?.base || "")}`)
@@ -67,6 +86,11 @@ if (cmd === "status" || cmd === "doctor") {
     if (h.cliVersion) console.log(`  cli version   ${h.cliVersion}`)
     console.log(`  catalog       ${h.catalog?.models} models ${c.d(`(${h.catalog?.generatedAt?.slice(0, 10)})`)}`)
     console.log(`  schema        ${h.schema?.paths} paths ${c.d(`(${h.schema?.generatedAt?.slice(0, 10)})`)}`)
+  }
+  if (h?.plan?.needsBridge === false) {
+    console.log("")
+    console.log(c.y(`  This package is for the $1 Go plan only.`))
+    console.log(`  ${h.plan.note}`)
   }
   const cr = await credits()
   if (cr) {
@@ -120,6 +144,6 @@ if (cmd === "status" || cmd === "doctor") {
   }
   console.log(c.g("\ndiscovery complete"))
 } else {
-  console.log(`usage: opencode-commandcode <status|doctor|start|models|schema|discover>`)
+  console.log(`usage: opencode-cc-go <status|doctor|start|models|schema|discover>`)
   process.exit(1)
 }

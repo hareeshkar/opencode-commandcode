@@ -46,6 +46,8 @@ Four things in one zero-dependency Node package:
 |---|---|---|
 | **Bridge server** | `src/bridge.js` | Local OpenAI-compatible HTTP server; translates to Command Code's private format |
 | **Translation layer** | `src/translate.js` | Pure functions: OpenAI ⇄ wire, no I/O, fully unit-testable |
+| **Plan classifier** | `src/plan.js` | Side-effect-free: "is this user on the $1 Go plan, or do they already have an API?" |
+| **Port manager** | `src/port.js` | Auto-selects a free port, publishes it via a state file, discovers it again |
 | **Plugin** | `src/plugin.js` | OpenCode hook package: injects the provider, supervises the bridge |
 | **Installer** | `scripts/install.js` | Writes the provider into `opencode.json` (the reliable path) |
 
@@ -59,6 +61,7 @@ Plus the discovery system that generates the data all of them read:
 | `scripts/probe-schema.mjs` | `schema.generated.json` | network brute-force via Zod error inference |
 | `scripts/probe-parts.mjs` | `parts.generated.json` | network, via union-type error dump |
 | `scripts/safe-io.mjs` | — | output-path guard (see §16.6) |
+| `scripts/install.js` | writes `opencode.json` | plan gate + auto port resolution (see §11.3) |
 
 **Zero runtime dependencies.** Node built-ins only. The whole point is
 portability: it must run on a machine with a bare `node` and nothing else.
@@ -947,6 +950,119 @@ stale catalog, or upstream unreachable.
 
 ---
 
+## 10.6 Port resilience
+
+A hardcoded port is a single point of failure. If anything else on the machine
+holds 8787, the bridge simply cannot start, and the "fix" is a manual
+`lsof` / `kill` / edit-config ritual. That is not acceptable for a package
+someone installs with one command.
+
+### Selection
+
+`src/port.js` scans upward from the preferred port and binds the first free
+one:
+
+```
+8787 free          -> 8787   strategy: "preferred"
+8787 taken         -> 8788   strategy: "scanned"
+8787-8786 taken    -> ephemeral from the OS   strategy: "ephemeral"
+```
+
+Free-ness is proven by actually attempting a bind, not by reading `/proc` or
+trusting a heuristic.
+
+### Discovery — the part that actually matters
+
+An auto-selected port is useless if nothing else knows about it. The bridge
+writes it to `~/.commandcode-bridge/state.json`:
+
+```json
+{ "port": 8789, "host": "127.0.0.1", "pid": 97975, "startedAt": "…" }
+```
+
+and everything else asks rather than assumes:
+
+| Consumer | How it finds the port |
+|---|---|
+| CLI (`status`, `doctor`, `models`) | `discoverPort()` |
+| Installer (writes `baseURL` into `opencode.json`) | `discoverPort()` |
+| Plugin (builds `baseURL`) | `discoverPort()` |
+| Test suite | `discoverPort()` + `syncPort()` |
+
+`discoverPort()` resolution order:
+
+1. `CMD_BRIDGE_PORT`, if the user pinned one
+2. the state file, **if the recorded pid is alive and the port answers**
+3. a scan upward from the default
+
+A state file left by a crashed bridge is detected as stale (dead pid, or a port
+that does not answer) and deleted rather than trusted. Otherwise a stale file
+would send every client to a port nobody is listening on — a failure that
+looks exactly like "the bridge died".
+
+`SIGINT`/`SIGTERM`/`exit` all clear the state file, so a normal stop never
+leaves a trap behind.
+
+### Verified
+
+With a foreign process squatting on 8787 for the whole run:
+
+```
+$ opencode-cc-go start
+opencode-commandcode-go bridge on http://127.0.0.1:8789  (49 models, cli 1.69.0)
+                                                       [port 8789 chosen: scanned]
+
+$ opencode-cc-go install
+installed provider 'commandcode' … 49 models registered
+  → opencode.json baseURL: http://127.0.0.1:8789/v1
+
+$ npm test
+38 passed, 0 failed, 0 skipped
+```
+
+Everything followed the port. No manual step, no config edit.
+
+### A trap worth naming
+
+A squatter that accepts TCP but never speaks HTTP looks exactly like a dead
+bridge to any client. The first version of the test harness probed the
+*default* port before resolving the real one, so it "found" the squatter,
+concluded the bridge was down, and tried to spawn a second one. The symptom was
+an opaque `setTypeOfService EINVAL` from undici.
+
+Order matters: **discover, then probe.** Any component that checks liveness
+must resolve the port first, or it will cheerfully talk to whatever else the
+machine is running.
+
+## 10.7 Health must not block on the network
+
+`/health` is polled by the CLI, the plugin, the installer and the test suite.
+The first implementation did two upstream round-trips inline, which took ~3.2 s
+on a cold cache. Every caller with a short timeout concluded the bridge was
+dead — while `curl` against the same endpoint succeeded.
+
+Measured directly:
+
+```
+cold /health   3.197s     -> callers time out, report "unreachable"
+warm /health   0.017s
+```
+
+Now:
+
+- upstream status is fetched at most once per 30 s and cached
+- a cold cache answers **immediately** from local state and kicks the fetch off
+  in the background
+- `?deep=1` forces a synchronous fresh check for callers that genuinely want one
+
+```
+cold /health   0.041s
+warm /health   0.017s
+```
+
+`/health` now also reports `baseURL` and `port`, so a client can confirm it is
+talking to the bridge it thinks it is.
+
 ## 11. OpenCode integration
 
 ### 11.1 What was tried, and what the evidence said
@@ -1000,7 +1116,51 @@ discovered catalog so it cannot drift.
 mechanism, and it starts the bridge and provides the `commandcode_status` tool
 on builds where plugins do load.
 
-### 11.2 Auth is required
+### 11.2 The plan gate — who this is for
+
+Command Code's own words: *"Every plan except the Go plan has API access."*
+
+That means this package is **only** useful to one tier. Everyone else already
+has a supported API, and installing a bridge would add a moving part for no
+benefit. So the plan is detected and users who do not need this are stopped
+before anything is written.
+
+`src/plan.js` is deliberately a standalone, side-effect-free module. Two very
+different entry points need it — a long-running server and a short-lived CLI —
+and importing the server from the CLI would bind a port and then `process.exit`
+on `EADDRINUSE`. (That actually happened during development.)
+
+| planId | `needsBridge` | Behaviour |
+|---|---|---|
+| `individual-go-v1` | `true` | proceed |
+| `individual-provider` | `false` | refuse, print the direct-config snippet |
+| `individual-pro-v1` | `false` | refuse |
+| `individual-max` | `false` | refuse |
+| `individual-ultra` | `false` | refuse |
+| `individual-goat` | `false` | refuse |
+| `teams-pro` | `false` | refuse |
+| anything unrecognised | `null` | **proceed** — an unknown new tier might be the Go plan |
+
+An unrecognised plan deliberately does *not* block. Guessing "this must be a Pro
+user, refuse" would lock out a legitimately new Go tier on launch day.
+
+`opencode-cc-go install` on an API-enabled plan:
+
+```
+  You are on the 'individual-provider' plan, which already includes API access.
+
+  This package is only for the $1 Go plan, which has no Provider API.
+  You do not need it. Point OpenCode at the API directly instead:
+
+    "provider": { "commandcode": { "npm": "@ai-sdk/openai-compatible", … } }
+  …
+  Install this package anyway with --force if you specifically want the bridge.
+```
+
+`--force` overrides. `opencode-cc-go status` always shows the plan line, so the
+answer is visible without reading the docs.
+
+### 11.3 Auth is required
 
 OpenCode will not consider a custom provider usable without a credential —
 either inline in `options.apiKey` or in `opencode auth`. The installer writes
@@ -1008,7 +1168,7 @@ either inline in `options.apiKey` or in `opencode auth`. The installer writes
 is never given to OpenCode. Without any value here, models appear in
 `opencode models` but fail at call time with *"Model unavailable"*.
 
-### 11.3 `commandcode_status` tool
+### 11.4 `commandcode_status` tool
 
 Registered by the plugin, callable by the agent. Reports bridge health,
 upstream reachability, account, CLI version, catalog size, discovered schema
@@ -1022,18 +1182,20 @@ model work".
 ## 12. Testing
 
 ```bash
-npm test                    # 27 checks, live API
+npm test                    # 38 checks, live API
 npm test -- --offline       # structural only, zero requests, zero credit
 npm test -- --model <id>    # override the model under test
 ```
 
-**Current status: 27 passed, 0 failed.**
+**Current status: 38 passed, 0 failed.** Verified stable over 4 consecutive runs.
 
 ### 12.1 What is covered
 
 | Group | Checks |
 |---|---|
-| 0. artifacts | catalog/schema/parts present; 9 required `config` fields present; every context window numeric; vision/text-only split is non-trivial |
+| 0a. ports | a free port is found; **an occupied port is skipped**; `isServing()` finds live and rejects dead; the state file records the bound port |
+| 0a. plans | Go ⇒ needs the bridge; Provider/Pro/Max/GOAT/Teams ⇒ told they do not; unknown ⇒ not guessed |
+| 0b. artifacts | catalog/schema/parts present; 9 required `config` fields present; every context window numeric; vision/text-only split is non-trivial; health reports its own `baseURL`; default `/health` responds in <1 s |
 | 1. bridge | healthy; upstream reachable |
 | 2. models | `/v1/models` list; test model advertised; every `context_length` numeric |
 | 3. text | non-streaming 200 + content + usage; streaming content + `finish_reason` + usage |
@@ -1255,7 +1417,7 @@ because it reads `package.json` every time.
 |---|---|---|
 | `Model unavailable: commandcode/…` | Provider not installed | `npm run install` |
 | `ECONNREFUSED` / `fetch failed` | Bridge not running | `npm run bridge` |
-| `MODEL_NOT_IN_PLAN` | Model not on this plan | `opencode-commandcode models` |
+| `MODEL_NOT_IN_PLAN` | Model not on this plan | `opencode-cc-go models` |
 | `upgrade_required` | Bridge sending a stale version | `cmd --version`; re-run `discover` |
 | "I can't see any image" | Text-only model, or image dropped | check `modalities` in config; see §12.4 |
 | Empty reply, `finish_reason: length` | Reasoning ate the budget | raise `max_tokens` |
@@ -1264,10 +1426,10 @@ because it reads `package.json` every time.
 
 ### 14.4 Cost discipline
 
-A full 27-check test run costs roughly **0.02 credits** of a 10-credit monthly
+A full 38-check test run costs roughly **0.02 credits** of a 10-credit monthly
 allowance. Discovery costs **zero** — validation failures never reach a model.
 The 5-hour rolling window (cap 3) and weekly window (cap 6) are the real
-constraint; `opencode-commandcode status` prints current usage.
+constraint; `opencode-cc-go status` prints current usage.
 
 ---
 
@@ -1422,7 +1584,41 @@ a field that accepts anything look identical.
 submitted and its result recorded in the artifact, and unconfirmable fields are
 marked `unverified` rather than being reported as confirmed.
 
-### 16.8 The AI SDK stripping tool schemas
+### 16.8 Probing a port occupied by a non-HTTP listener
+
+**Symptom:** `setTypeOfService EINVAL` from undici; the suite reported a dead
+bridge and tried to spawn a second one.
+
+**Cause:** the harness probed the *default* port before resolving the real one.
+A foreign process that accepts TCP but never speaks HTTP is indistinguishable
+from a healthy bridge on the same port.
+
+**Fix:** discover the port, then probe. See §10.6. This is a general hazard for
+any code that health-checks a loopback service.
+
+### 16.9 `/health` too slow to be a health check
+
+**Symptom:** the CLI reported `unreachable` while `curl /health` on the same URL
+succeeded.
+
+**Cause:** `/health` performed two upstream round-trips inline (3.2 s cold),
+longer than the caller's timeout.
+
+**Fix:** cache upstream status for 30 s, answer cold calls from local state, and
+expose `?deep=1` for a forced synchronous check. Now 41 ms cold, 17 ms warm.
+
+### 16.10 Brittle test assertions
+
+**Symptom:** an intermittent failure where the model replied `STREAM` instead of
+`STREAM_OK`.
+
+**Cause:** the assertion required an exact string from a nondeterministic model.
+The transport was fine; the test was measuring the model's mood.
+
+**Fix:** assert on a distinctive prefix. A test that fails on model verbosity
+gets ignored, and then it protects nothing.
+
+### 16.11 The AI SDK stripping tool schemas
 
 Covered in §12.4. Not a bridge bug; documented so the next person does not lose
 an afternoon to it.

@@ -1,7 +1,7 @@
 {
-  "name": "opencode-commandcode",
+  "name": "opencode-commandcode-go",
   "version": "1.0.0",
-  "description": "Use your Command Code (commandcode.ai) $1 Go plan inside OpenCode as a native provider, with self-discovered models, vision routing and a self-healing local bridge.",
+  "description": "Bridge the $1 Command Code GO plan (no Provider API) into OpenCode. 49 models, real vision, real tool use. For Provider/Pro/Max/GOAT plans you do not need this - connect the API directly.",
   "type": "module",
   "main": "./src/plugin.js",
   "exports": {
@@ -10,22 +10,22 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "opencode-commandcode": "./bin/opencode-commandcode.js"
+    "opencode-cc-go": "./bin/opencode-cc-go.js"
   },
   "files": [
-    "DEVELOPER.md",
-    "LICENSE",
-    "README.md",
+    "src",
     "bin",
-    "catalog.extracted.json",
+    "test",
     "catalog.json",
-    "catalog.reachability.json",
+    "catalog.extracted.json",
+    "schema.generated.json",
     "envelope.generated.json",
     "parts.generated.json",
-    "schema.generated.json",
     "scripts",
-    "scripts/install.js",
-    "src"
+    "README.md",
+    "DEVELOPER.md",
+    "LICENSE",
+    "!catalog.reachability.json"
   ],
   "scripts": {
     "bridge": "node src/bridge.js",
@@ -46,12 +46,15 @@
     "opencode-plugin",
     "commandcode",
     "command-code",
+    "go-plan",
+    "go",
     "ai",
     "provider",
     "bridge",
     "vision",
     "deepseek",
-    "openai-compatible"
+    "openai-compatible",
+    "plugin"
   ],
   "license": "MIT",
   "author": "hareeshkar",

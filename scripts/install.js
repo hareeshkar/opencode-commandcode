@@ -29,10 +29,25 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 
-const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const REPO = path.resolve(HERE, "..")
+const { classifyPlan, fetchPlanId, DIRECT_API_INSTRUCTIONS } = await import(
+  new URL("../src/plan.js", `file://${HERE}/`).href
+)
 const PROVIDER_ID = "commandcode"
-const PORT = process.env.CMD_BRIDGE_PORT || "8787"
 const HOST = process.env.CMD_BRIDGE_HOST || "127.0.0.1"
+// The bridge may have auto-selected a different port; ask rather than assume.
+let PORT = process.env.CMD_BRIDGE_PORT || "8787"
+
+// Resolve the real port before writing a baseURL into the user's config.
+if (!process.env.CMD_BRIDGE_PORT) {
+  try {
+    const { discoverPort } = await import(new URL("../src/port.js", import.meta.url).href)
+    const found = await discoverPort({ host: HOST })
+    if (found) PORT = String(found.port)
+  } catch {}
+}
+
 // Catalog entries that declare no window fall back to a conservative 128k.
 const DEFAULT_CONTEXT = Number(process.env.CMD_DEFAULT_CONTEXT || 128000)
 
@@ -112,7 +127,48 @@ if (flag("--print")) {
 }
 
 if (flag("--remove")) {
-  const cfg = readConfig()
+  // ---- plan gate -------------------------------------------------------------
+// Installing a bridge on a plan that already has API access is pointless and
+// adds a moving part for nothing. Detect the plan and say so, unless the user
+// explicitly overrides with --force.
+async function checkPlan(force) {
+  if (force) return null
+  let key
+  try {
+    const p = process.env.CMD_AUTH_PATH ||
+      path.join(os.homedir(), ".commandcode", "auth.json")
+    key = process.env.COMMAND_CODE_API_KEY || JSON.parse(readFileSync(p, "utf8")).apiKey
+  } catch {
+    return null // cannot determine; let them proceed
+  }
+  let version = "1.69.0"
+  try {
+    version = JSON.parse(readFileSync(
+      path.join(os.homedir(), ".local/lib/node_modules/command-code/package.json"), "utf8")).version
+  } catch {}
+  try {
+    const planId = await fetchPlanId({ apiKey: key, cliVersion: version })
+    const info = classifyPlan(planId)
+    if (info.needsBridge === false) {
+      console.log("")
+      console.log(`  You are on the '${planId}' plan, which already includes API access.`)
+      console.log("")
+      console.log(DIRECT_API_INSTRUCTIONS)
+      console.log("")
+      process.exit(0)
+    }
+    if (info.needsBridge === true) {
+      console.log(`  plan: ${planId} (Go) -- bridge is the supported path.`)
+    }
+    return info
+  } catch {
+    return null
+  }
+}
+
+if (!flag("--print")) await checkPlan(flag("--force"))
+
+const cfg = readConfig()
   if (cfg.provider && cfg.provider[PROVIDER_ID]) {
     delete cfg.provider[PROVIDER_ID]
     if (flag("--dry-run")) console.log("would remove provider 'commandcode'")

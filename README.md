@@ -1,28 +1,90 @@
-# opencode-commandcode
+# opencode-commandcode-go
 
-**Use your $1 Command Code plan inside OpenCode. 49 models. Real vision. Real tool use.**
+**Use your $1 Command Code GO plan inside OpenCode. 49 models. Real vision. Real tool use.**
 
 ---
 
-## The problem this solves
+## ⚠️ First: is this even for you?
+
+**This package is ONLY for the $1/month Go plan.**
+
+Command Code sells several plans, and only one of them is missing an API:
+
+| Plan | Price | Has API access? | What you should do |
+|---|---|---|---|
+| **Go** | **$1/mo** | **❌ NO** | **✅ Install this package** |
+| Provider | $15/mo | ✅ Yes, full OpenAI + Anthropic API | ❌ Don't install — connect the API directly |
+| Pro | ~$30/mo | ✅ Yes | ❌ Don't install — connect directly |
+| Max | ~$60/mo | ✅ Yes | ❌ Don't install — connect directly |
+| GOAT / Ultra | $60+/mo | ✅ Yes | ❌ Don't install — connect directly |
+| Team | $40+/mo | ✅ Yes | ❌ Don't install — connect directly |
+
+Command Code states it plainly in their own docs: *"Every plan except the Go
+plan has API access."*
+
+### If you are on Provider, Pro, Max, or GOAT — stop here
+
+You already have a real, supported API. Don't run a bridge. This is the whole
+thing, in your `opencode.json`:
+
+```jsonc
+{
+  "provider": {
+    "commandcode": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Command Code",
+      "options": {
+        "baseURL": "https://api.commandcode.ai/v1",
+        "apiKey": "{env:COMMAND_CODE_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Then create a key at <https://commandcode.ai/studio> and:
+
+```bash
+export COMMAND_CODE_API_KEY="cmd_..."
+opencode run -m commandcode/<any-model-id> "hi"
+```
+
+That's supported, documented, and simpler than anything in this repo. This
+package would only add a moving part for you.
+
+### Good news: you don't have to check
+
+This package **detects your plan and refuses to install** if you don't need it.
+It reads your subscription from the API and, if it finds a plan that already has
+API access, it stops and shows you the config above instead:
+
+```
+$ opencode-cc-go install
+
+  You are on the 'individual-provider' plan, which already includes API access.
+
+  This package is only for the $1 Go plan, which has no Provider API.
+  You do not need it. Point OpenCode at the API directly instead:
+  ...
+  Install anyway with --force if you specifically want the bridge.
+```
+
+Override with `--force` if you know you want it anyway.
+
+---
+
+## For the $1 Go plan users
 
 You like [Command Code](https://commandcode.ai) because it costs **$1/month**.
 You like [OpenCode](https://opencode.ai) because it's your editor.
 
-But if you buy the $1 **Go** plan, you hit a wall:
-
-| Plan | Price | Can other tools use it? |
-|---|---|---|
-| Go | **$1/mo** | ❌ No API access |
-| Provider | $15/mo | ✅ Full OpenAI + Anthropic API |
-| GOAT / Pro / Max | $60+ | ✅ Full API |
-
-Command Code's docs are explicit: *"Every plan except the Go plan has API
-access."* So the cheap plan is a **closed loop** — it only works inside their
-own `cmd` terminal app.
+But the Go plan is a **closed loop**. Command Code's docs are explicit about
+the consequence: *"Every plan except the Go plan has API access."* So your
+cheap plan only works inside their own `cmd` terminal app, and nothing else can
+talk to it.
 
 That's a shame, because underneath, the $1 plan already gives you access to
-**49 different frontier and open models**, several of which can read images.
+**49 different frontier and open models**, 30 of which can read images.
 
 ## What this package does
 
@@ -52,14 +114,19 @@ You need [Node 20+](https://nodejs.org) and a Command Code account
 
 ```bash
 # 1. install the package
-npm install -g opencode-commandcode
+npm install -g opencode-commandcode-go
 
 # 2. tell OpenCode about it (writes the provider into opencode.json)
-opencode-commandcode install
+opencode-cc-go install
 
 # 3. start the bridge
-npm run bridge          # leave this running
+opencode-cc-go start    # leave this running
 ```
+
+If port 8787 is already taken by something else, the bridge **picks the next
+free port automatically** and everything else — the installer, the CLI, the
+OpenCode config — follows it. You will never be asked to go find a free port
+yourself. Pin a specific port with `CMD_BRIDGE_PORT=8788` if you prefer.
 
 Now use it:
 
@@ -69,10 +136,11 @@ opencode run -m commandcode/deepseek/deepseek-v4.1-flash "hello"
 
 Or run `opencode` and pick any `commandcode/...` model from `/models`.
 
-Check everything is healthy:
+Check everything is healthy. The plan line confirms you're actually
+on the plan this is for:
 
 ```bash
-opencode-commandcode status
+opencode-cc-go status
 ```
 
 ```
@@ -211,14 +279,14 @@ technique in detail.
 
 | Command | What it does |
 |---|---|
-| `opencode-commandcode install` | register the provider in OpenCode |
-| `opencode-commandcode status` | health, plan, credits, model count |
-| `opencode-commandcode doctor` | diagnose a broken setup |
-| `opencode-commandcode start` | run the bridge in the foreground |
-| `opencode-commandcode models` | list models (`--vision` for image-capable only) |
-| `opencode-commandcode schema` | print the discovered API contract |
-| `opencode-commandcode discover` | re-learn everything from the live API |
-| `opencode-commandcode --help` | usage |
+| `opencode-cc-go install` | register the provider in OpenCode |
+| `opencode-cc-go status` | health, plan, credits, model count |
+| `opencode-cc-go doctor` | diagnose a broken setup |
+| `opencode-cc-go start` | run the bridge in the foreground |
+| `opencode-cc-go models` | list models (`--vision` for image-capable only) |
+| `opencode-cc-go schema` | print the discovered API contract |
+| `opencode-cc-go discover` | re-learn everything from the live API |
+| `opencode-cc-go --help` | usage |
 
 Inside OpenCode, the agent can also call a `commandcode_status` tool to report
 bridge health on demand.
@@ -241,6 +309,25 @@ testing, and a bigger model costs credit without testing anything extra.
 
 ---
 
+## Resilience
+
+Things that are handled for you, because a package you install with one command
+should not need babysitting:
+
+| Situation | What happens |
+|---|---|
+| Port 8787 already in use | bridge takes the next free port; CLI, installer and OpenCode config all follow it |
+| Bridge not running | `opencode-cc-go start`, or let the plugin start it |
+| Bridge hung on the port | detected, reported with the exact `lsof` commands to clear it |
+| `opencode` restarts | state file tells the new process where the bridge is |
+| You are on a plan with a real API | the installer **refuses** and shows you the direct config instead |
+| Model retired or plan-gated | filtered out by `opencode-cc-go models`; never advertised if unusable |
+| Stale state file from a crash | detected via dead pid, deleted rather than trusted |
+
+Health checks are non-blocking: `opencode-cc-go status` answers in ~40 ms even
+when Command Code's API is slow, because local liveness and upstream reachability
+are reported separately.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -250,10 +337,16 @@ testing, and a bigger model costs credit without testing anything extra.
 | `COMMAND_CODE_API_KEY` | — | override; otherwise reads `~/.commandcode/auth.json` |
 | `CMD_API_BASE` | `https://api.commandcode.ai` | upstream base URL |
 | `CMD_DEFAULT_CONTEXT` | `128000` | fallback context window |
+| `CMD_BRIDGE_STATE_DIR` | `~/.commandcode-bridge` | where the chosen port is recorded |
+| `CMD_AUTH_PATH` | `~/.commandcode/auth.json` | credential file |
 
 ---
 
 ## Honest caveats
+
+**This is for the Go plan only.** If a future Command Code release gives the Go
+plan a real API, this package should be deleted, not maintained. It exists to
+paper over one specific gap, and the gap is documented on their site.
 
 This talks to an **undocumented internal endpoint** that Command Code has not
 published for the Go plan. Things to know:
