@@ -909,7 +909,29 @@ status. The bridge emits a `finish_reason:"error"` chunk, then an OpenAI error
 frame, then `[DONE]` — so a client sees a clean stream termination with a
 readable reason rather than a truncated body.
 
-### 10.4 Self-healing
+### 10.4 Startup failures
+
+A bind failure must be legible, not an unhandled `'error'` event. The bridge
+handles the three cases that actually occur:
+
+| Condition | Behaviour | Exit |
+|---|---|---|
+| Port held by a *healthy* bridge | "already running", stand down | `0` |
+| Port held by a hung / foreign process | print `lsof` recovery commands and a `CMD_BRIDGE_PORT` alternative | `1` |
+| `EACCES` (privileged port) | suggest a port above 1024 | `1` |
+| Anything else | print the message | `1` |
+
+Exiting `0` on the duplicate case matters: the supervisor's health poll will
+find the live instance, and a non-zero exit there would look like a crash.
+
+A hung instance is the case that motivated this. A previous bridge held 8787
+without answering `/health`, and a duplicate start produced a bare
+`EADDRINUSE` stack trace with no recovery path.
+
+`process.on("unhandledRejection")` also logs instead of terminating, so one bad
+request cannot silently kill a long-running bridge.
+
+### 10.5 Self-healing
 
 The bridge is a child process the plugin owns:
 

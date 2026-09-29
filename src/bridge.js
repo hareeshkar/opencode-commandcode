@@ -434,6 +434,48 @@ export { buildEnvelope, buildConfig, modelsPayload }
 // CMD_BRIDGE_NO_LISTEN=1 imports the module as a library (tests, tooling)
 // without binding a port.
 if (process.env.CMD_BRIDGE_NO_LISTEN !== "1") {
+  // A previous instance may still hold the port -- especially one that is hung
+  // rather than serving. Crashing with an unhandled 'error' event is the worst
+  // outcome here: the caller sees nothing useful and the port stays occupied.
+  server.on("error", async (err) => {
+    if (err.code === "EADDRINUSE") {
+      // If something healthy already answers, this is a duplicate start and
+      // exiting 0 is correct -- the supervisor will find the live instance.
+      const ac = new AbortController()
+      const t = setTimeout(() => ac.abort(), 1500)
+      try {
+        const r = await fetch(`http://${HOST}:${PORT}/health`, { signal: ac.signal })
+        clearTimeout(t)
+        if (r.ok) {
+          process.stderr.write(
+            `opencode-commandcode bridge already running on http://${HOST}:${PORT}\n`,
+          )
+          process.exit(0)
+        }
+      } catch {
+        /* nothing healthy is listening -- fall through and report */
+      }
+      process.stderr.write(
+        `port ${PORT} is held by a process that is not serving this bridge.\n` +
+          `  find it:  lsof -ti:${PORT}\n` +
+          `  clear it:  lsof -ti:${PORT} | xargs kill -9\n` +
+          `  or use another port:  CMD_BRIDGE_PORT=8788 npm run bridge\n`,
+      )
+      process.exit(1)
+    }
+    if (err.code === "EACCES") {
+      process.stderr.write(`not permitted to bind ${HOST}:${PORT} (try a port above 1024)\n`)
+      process.exit(1)
+    }
+    process.stderr.write(`bridge server error: ${err.message}\n`)
+    process.exit(1)
+  })
+
+  // A hung upstream or socket must not take the process down silently.
+  process.on("unhandledRejection", (e) => {
+    process.stderr.write(`bridge: unhandled rejection: ${e?.message || e}\n`)
+  })
+
   server.listen(PORT, HOST, () => {
     process.stderr.write(
       `opencode-commandcode bridge on http://${HOST}:${PORT}  ` +
