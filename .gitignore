@@ -71,3 +71,7 @@ out/
 # ---- temp ------------------------------------------------------------------
 tmp/
 .cache/
+
+# ---- launchd / local service logs ----------------------------------------
+bridge.out.log
+bridge.err.log

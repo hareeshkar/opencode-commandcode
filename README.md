@@ -119,9 +119,14 @@ npm install -g opencode-commandcode-go
 # 2. tell OpenCode about it (writes the provider into opencode.json)
 opencode-cc-go install
 
-# 3. start the bridge
-opencode-cc-go start    # leave this running
+# 3. keep the bridge running
+opencode-cc-go service        # macOS: launchd agent, starts at login, restarts on crash
+opencode-cc-go start          # or just run it in a terminal
 ```
+
+Step 3 with `service` means you never have to think about it again: it starts at
+login, and if the bridge crashes it is restarted within about 10 seconds.
+`opencode-cc-go service:remove` uninstalls it.
 
 If port 8787 is already taken by something else, the bridge **picks the next
 free port automatically** and everything else — the installer, the CLI, the
@@ -283,6 +288,8 @@ technique in detail.
 | `opencode-cc-go status` | health, plan, credits, model count |
 | `opencode-cc-go doctor` | diagnose a broken setup (fails loudly on drift) |
 | `opencode-cc-go sync` | re-point OpenCode's config at the live bridge |
+| `opencode-cc-go service` | run it as a macOS launchd agent (auto-start, auto-restart) |
+| `opencode-cc-go service:remove` | uninstall the launchd agent |
 | `opencode-cc-go start` | run the bridge in the foreground |
 | `opencode-cc-go models` | list models (`--vision` for image-capable only) |
 | `opencode-cc-go schema` | print the discovered API contract |
@@ -318,7 +325,9 @@ should not need babysitting:
 | Situation | What happens |
 |---|---|
 | Port 8787 already in use | bridge takes the next free port; CLI, installer and OpenCode config all follow it |
-| Bridge not running | `opencode-cc-go start`, or let the plugin start it |
+| Bridge not running | `opencode-cc-go service` (permanent) or `opencode-cc-go start` |
+| Bridge crashed | launchd restarts it; `service:status` shows the pid changing |
+| Bridge moved ports on restart | OpenCode's config is rewritten automatically; restart OpenCode |
 | Bridge hung on the port | detected, reported with the exact `lsof` commands to clear it |
 | `opencode` restarts | state file tells the new process where the bridge is |
 | You are on a plan with a real API | the installer **refuses** and shows you the direct config instead |

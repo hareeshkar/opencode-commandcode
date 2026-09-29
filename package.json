@@ -13,24 +13,26 @@
     "opencode-cc-go": "./bin/opencode-cc-go.js"
   },
   "files": [
-    "src",
-    "bin",
-    "test",
-    "catalog.json",
-    "catalog.extracted.json",
-    "schema.generated.json",
-    "envelope.generated.json",
-    "parts.generated.json",
-    "scripts",
-    "README.md",
+    "!catalog.reachability.json",
     "DEVELOPER.md",
     "LICENSE",
-    "!catalog.reachability.json"
+    "README.md",
+    "bin",
+    "catalog.extracted.json",
+    "catalog.json",
+    "envelope.generated.json",
+    "parts.generated.json",
+    "schema.generated.json",
+    "scripts",
+    "scripts/install-service.sh",
+    "scripts/launchd.plist.template",
+    "src",
+    "test"
   ],
   "scripts": {
     "bridge": "node src/bridge.js",
-    "status": "node bin/opencode-commandcode.js status",
-    "doctor": "node bin/opencode-commandcode.js doctor",
+    "status": "node bin/opencode-cc-go.js status",
+    "doctor": "node bin/opencode-cc-go.js doctor",
     "catalog": "node scripts/extract-catalog.mjs > catalog.extracted.json && node scripts/build-catalog.mjs",
     "catalog:probe": "node scripts/extract-catalog.mjs > catalog.extracted.json && node scripts/build-catalog.mjs --probe",
     "schema": "node scripts/extract-envelope.mjs && node scripts/probe-schema.mjs",
@@ -39,7 +41,10 @@
     "fixture": "node test/make-fixture-image.mjs",
     "test": "node test/run-all.mjs",
     "install": "node scripts/install.js",
-    "uninstall": "node scripts/install.js --remove"
+    "uninstall": "node scripts/install.js --remove",
+    "service": "zsh scripts/install-service.sh",
+    "service:remove": "zsh scripts/install-service.sh --remove",
+    "service:status": "zsh scripts/install-service.sh --status"
   },
   "keywords": [
     "opencode",

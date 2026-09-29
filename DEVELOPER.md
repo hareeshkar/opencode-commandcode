@@ -1175,6 +1175,31 @@ warm /health   0.017s
 `/health` now also reports `baseURL` and `port`, so a client can confirm it is
 talking to the bridge it thinks it is.
 
+## 10.8 Running the bridge as a service
+
+A bridge that dies with the terminal is not finished. On macOS the package
+ships a launchd agent:
+
+```
+npm run service          # install + start
+npm run service:status   # is it loaded, what pid
+npm run service:remove   # unload + delete
+```
+
+`scripts/launchd.plist.template` is the agent, parameterised with the repo path
+and `HOME`. Two details in it are deliberate:
+
+- **`KeepAlive` uses `SuccessfulExit: false`.** The bridge exits `0` when it
+  discovers a healthy instance already holding the port. Restarting on that
+  would be a respawn loop: A notices B, B is killed, A restarts, and so on.
+  Restarting only on a *crash* keeps the supervisor honest.
+- **`HOME` is set explicitly.** launchd hands agents a nearly empty
+  environment. The bridge reads `~/.commandcode/auth.json`, so relying on
+  `os.homedir()` falling back to the password database is a needless risk.
+
+Verified: `kill -9` on the supervised pid produced a new pid within ~8 s and a
+healthy `/health` immediately after.
+
 ## 11. OpenCode integration
 
 ### 11.1 What was tried, and what the evidence said

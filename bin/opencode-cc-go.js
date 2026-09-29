@@ -87,7 +87,11 @@ if (cmd === "status" || cmd === "doctor") {
     console.log(`  opencode.json ${c.y("OUT OF SYNC")}  ${c.d(drift.note)}`)
   }
   if (h) {
-    console.log(`  upstream      ${h.upstream?.reachable ? c.g("reachable") : c.r("unreachable")}  ${c.d(h.upstream?.base || "")}`)
+    const up = h?.upstream
+  const upText = up?.pending ? c.y("checking…")
+    : up?.reachable ? c.g("reachable")
+    : c.r("unreachable")
+  console.log(`  upstream      ${upText}  ${c.d(up?.base || "")}`)
     if (h.upstream?.user) console.log(`  account       ${h.upstream.user}`)
     if (h.cliVersion) console.log(`  cli version   ${h.cliVersion}`)
     console.log(`  catalog       ${h.catalog?.models} models ${c.d(`(${h.catalog?.generatedAt?.slice(0, 10)})`)}`)
@@ -113,6 +117,8 @@ if (cmd === "status" || cmd === "doctor") {
     if (!h) {
       console.log(c.y("\n  Bridge is down. Start it with:  opencode-cc-go start"))
       bad = true
+    } else if (h.upstream?.pending) {
+      console.log(c.dim("\n  upstream check still in progress; run status again in a moment"))
     }
     if (!drift.inSync) {
       console.log(c.y(`\n  ${drift.note}`))
