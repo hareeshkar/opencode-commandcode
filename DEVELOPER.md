@@ -1546,6 +1546,17 @@ vision on a real generated PNG, and token accounting.
 change. It is a separate file because it binds ports and manipulates process
 state; interleaving that with in-flight requests makes any failure ambiguous.
 
+The suite sets `CMD_NO_CONFIG_SYNC=1` for the same reason it sets
+`CMD_BRIDGE_STATE_DIR`: it runs on the same machine as the thing under test.
+Without the former, a bridge it starts for a test rewrites the user's real
+`opencode.json` to point at a throwaway port. That happened while writing this
+section, and left the live config pointing at `:59999` with a second orphaned
+bridge holding it — caught by `doctor`, repaired with `sync`.
+
+**Rule: any ad-hoc bridge you start by hand on a real machine needs
+`CMD_NO_CONFIG_SYNC=1`**, or it will rewrite the config. The env var exists for
+exactly this and is easy to forget.
+
 Two isolation details make the offline half safe to run against a live desktop
 setup, which is the situation it was actually written in:
 
