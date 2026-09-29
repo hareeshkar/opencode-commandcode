@@ -68,4 +68,5 @@ jobs:
 
       - name: done (dry run)
         if: ${{ inputs.dry-run == 'true' }}
-        run: echo "dry run: nothing published. Tag v1.0.0 and push to publish."
+        run: >-
+          echo "dry run - nothing published. Tag v1.0.0 and push to publish."
