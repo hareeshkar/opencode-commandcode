@@ -13,6 +13,7 @@
  */
 
 import { spawn } from "node:child_process"
+import net from "node:net"
 import { readFileSync, existsSync, statSync, openSync, readSync, closeSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -116,9 +117,24 @@ async function credits() {
 }
 
 const cmd = process.argv[2] || "status"
+const wantsHelp = ["--help", "-h", "help"].includes(cmd)
 const flag = (n) => process.argv.includes(n)
 
-if (cmd === "status" || cmd === "doctor") {
+if (wantsHelp) {
+  console.log(c.b("opencode-cc-go") + " — Command Code (Go plan) bridge for OpenCode\n")
+  console.log(`usage: opencode-cc-go <command>\n`)
+  console.log(`  status      plan, bridge health, credits, catalog`)
+  console.log(`  doctor      status plus config drift and discarded config keys`)
+  console.log(`  start       run the bridge in the foreground`)
+  console.log(`  stop        terminate the bridge and release its port`)
+  console.log(`  sync        re-point OpenCode's config at the live bridge`)
+  console.log(`  models      list discovered models  (--vision for image-capable only)`)
+  console.log(`  schema      dump the discovered /alpha/generate fields`)
+  console.log(`  discover    re-run catalog + schema + parts discovery`)
+  console.log(`\n  service commands: npm run service | service:status | service:remove`)
+  console.log(`\n  No command defaults to \`status\`.`)
+  process.exit(0)
+} else if (cmd === "status" || cmd === "doctor") {
   const h = await health()
   console.log(c.b("opencode-cc-go"))
   if (h?.plan) {
@@ -195,6 +211,47 @@ if (cmd === "status" || cmd === "doctor") {
 } else if (cmd === "start") {
   const p = spawn(process.execPath, [path.join(REPO, "src", "bridge.js")], { stdio: "inherit", env: { ...process.env, CMD_BRIDGE_PORT: String(PORT) } })
   p.on("exit", (code) => process.exit(code ?? 0))
+} else if (cmd === "stop") {
+  // Stop whatever bridge the state file points at, escalating to SIGKILL if it
+  // ignores SIGTERM. This is the deliberate counterpart to `start`: a bridge
+  // left running holds a loopback port forever, and a sandbox has no
+  // supervisor to reclaim it.
+  const { readState, clearState } = await import(new URL("../src/port.js", import.meta.url).href)
+  const st = readState()
+  if (!st?.pid) {
+    console.log(c.y("no bridge state found — nothing to stop"))
+    console.log(c.d(`  (state file: ${await import(new URL("../src/port.js", import.meta.url).href).then((m) => m.statePath())})`))
+    process.exit(0)
+  }
+  const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
+  if (!alive(st.pid)) {
+    console.log(c.y(`bridge pid ${st.pid} is gone; clearing stale state`))
+    clearState()
+    process.exit(0)
+  }
+  const stop = async (signal) => {
+    try { process.kill(st.pid, signal) } catch { return false }
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 100))
+      if (!alive(st.pid)) return true
+    }
+    return false
+  }
+  console.log(`  stopping bridge pid ${st.pid} on port ${st.port}…`)
+  if (!(await stop("SIGTERM"))) {
+    console.log(c.y("  ignored SIGTERM; sending SIGKILL"))
+    await stop("SIGKILL")
+  }
+  // The bridge clears its own state on exit; do it here too in case it did not.
+  clearState()
+  const portFree = await new Promise((res) => {
+    const s = net.createServer()
+    s.once("error", () => res(false))
+    s.once("listening", () => s.close(() => res(true)))
+    s.listen(st.port, HOST)
+  })
+  console.log(portFree ? c.g(`  port ${st.port} released`) : c.y(`  port ${st.port} still in use`))
+  console.log(c.d("  if OpenCode is running, restart it to pick up the change"))
 } else if (cmd === "sync") {
   // One-shot repair for drift the bridge could not fix itself, e.g. the config
   // was edited by hand, or a dotfile manager reverted it.
@@ -241,6 +298,7 @@ if (cmd === "status" || cmd === "doctor") {
   }
   console.log(c.g("\ndiscovery complete"))
 } else {
-  console.log(`usage: opencode-cc-go <status|doctor|sync|start|models|schema|discover>`)
+  console.log(c.b("opencode-cc-go") + " - Command Code (Go plan) bridge for OpenCode")
+  console.log(c.d("  run `opencode-cc-go --help` for the command list"))
   process.exit(1)
 }

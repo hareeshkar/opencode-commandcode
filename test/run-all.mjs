@@ -292,8 +292,24 @@ async function main() {
   ok("catalog distinguishes vision vs text-only models", imgCount > 0 && imgCount < (cat.models || []).length,
     `${imgCount} vision / ${(cat.models || []).length - imgCount} text-only`)
 
+  // ---- 8. lifecycle (offline, in-process)
+  //
+  // Spawns and kills real bridges on real ports, but never calls the API, so it
+  // is safe on every run and costs nothing. Kept in its own file because it
+  // binds ports and manipulates process state; interleaving that with live
+  // requests would make failures ambiguous.
+  console.log(C.bold("\n8. lifecycle and cleanup"))
+  {
+    const r = spawn(process.execPath, [path.join(HERE, "lifecycle.mjs")],
+      { stdio: "inherit", env: { ...process.env, CCGO_CHILD: "1" } })
+    const code = await new Promise((res) => r.on("exit", res))
+    if (code !== 0) { failed++; console.log(C.red("  FAIL  lifecycle suite")) }
+    else passed++
+  }
+
   if (OFFLINE) {
-    console.log(C.dim("\n  --offline: skipping all network tests\n"))
+    console.log(C.dim("\n  --offline: skipping all network tests"))
+    console.log(C.dim("  (lifecycle still runs: it makes no API calls)\n"))
     return summary()
   }
 

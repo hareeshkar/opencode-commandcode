@@ -163,6 +163,106 @@ opencode-commandcode
 
 ---
 
+## After you install: what runs, and when it stops
+
+This is the part people actually get stuck on, so it is spelled out.
+
+### The three processes
+
+| Process | Who starts it | Who stops it |
+|---|---|---|
+| OpenCode | you | you |
+| the bridge (`:8787`) | `opencode-cc-go service`, or the plugin, or `start` | see below |
+| the optional plugin | OpenCode, from `~/.config/opencode/plugins/` | OpenCode, automatically |
+
+The bridge holds **one** loopback port. It is the only thing this package leaves
+running, and it is always the only thing it will stop.
+
+### If you used `service` (recommended)
+
+Nothing to do, ever. launchd starts it at login and restarts it if it crashes.
+To stop it permanently:
+
+```bash
+opencode-cc-go service:remove     # unload the agent and delete the plist
+opencode-cc-go stop               # and shut down the bridge it was running
+```
+
+### If you used `start`
+
+The bridge lives and dies with that terminal. Close the terminal, or press
+Ctrl-C, and it is gone — no process, no port. `opencode-cc-go stop` ends it
+early from another shell.
+
+### If you let the plugin start it
+
+The plugin starts the bridge only if nothing else already has, and **it only
+ever stops a bridge it started itself**. When OpenCode closes, the plugin's
+teardown runs and the bridge goes with it. A bridge you started by hand, or one
+owned by `service`, is left completely alone.
+
+That rule is the whole safety story:
+
+> A bridge is stopped **if and only if** this package started it.
+
+### The port is never left occupied
+
+Whichever way it ends — Ctrl-C, `stop`, OpenCode closing, or a crash that
+launchd then repairs — the port is released. To confirm:
+
+```bash
+opencode-cc-go stop && lsof -ti:8787 || echo "8787 is free"
+```
+
+A wedged bridge that ignores the polite signal is escalated to `SIGKILL`
+rather than left squatting.
+
+### If the port moves
+
+The bridge auto-selects a free port, and it **rewrites `opencode.json` itself**
+when that changes, so the next OpenCode start is already correct. OpenCode reads
+its config once at startup, so if it is *running* at the moment the port moves,
+restart it. The bridge prints that instruction when it happens.
+
+---
+
+## Cloud, containers, and CI
+
+OpenCode Cloud and CI runners are ephemeral: no `~/.commandcode/auth.json`, no
+surviving config, and nothing supervising processes after the run ends. The
+plugin detects this and behaves differently on purpose.
+
+**You must supply the key yourself.** The Go plan has no public API, so there is
+nothing to fall back on:
+
+```bash
+export COMMAND_CODE_API_KEY=...        # required in a sandbox
+```
+
+With that set, the plugin starts the bridge inside the sandbox, serves the
+session, and tears it down when OpenCode exits — the process is tracked, not
+detached, so it cannot outlive the run and leak a port.
+
+Without it, the plugin says so in the log and registers no provider, rather than
+leaving a `commandcode/...` entry in the model list that can never answer.
+
+Two deliberate differences from a desktop run:
+
+- **No detached daemon.** A detached child in a sandbox survives its parent and
+  nothing reaps it.
+- **No config rewriting.** The config is thrown away at the end of the run, so
+  drift is reported and left alone.
+
+To use it in CI without the plugin, run the bridge yourself and point OpenCode
+at it — the bridge is an ordinary local HTTP server:
+
+```bash
+CMD_BRIDGE_PORT=8787 node src/bridge.js &
+opencode run -m commandcode/deepseek/deepseek-v4.1-flash "hello"
+```
+
+---
+
 ## What you get
 
 ### 49 models, discovered automatically
@@ -291,6 +391,7 @@ technique in detail.
 | `opencode-cc-go service` | run it as a macOS launchd agent (auto-start, auto-restart) |
 | `opencode-cc-go service:remove` | uninstall the launchd agent |
 | `opencode-cc-go start` | run the bridge in the foreground |
+| `opencode-cc-go stop` | stop the bridge and release its port |
 | `opencode-cc-go models` | list models (`--vision` for image-capable only) |
 | `opencode-cc-go schema` | print the discovered API contract |
 | `opencode-cc-go discover` | re-learn everything from the live API |
@@ -304,16 +405,32 @@ bridge health on demand.
 ## Tests
 
 ```bash
-npm test              # 27 checks against the live API
-npm test -- --offline # structural checks only, no requests, no credit cost
+npm test                # 51 live checks + 66 offline lifecycle checks
+npm test -- --offline   # structure and lifecycle only — no API calls, no credit cost
+node test/lifecycle.mjs # the lifecycle suite on its own, also free
 ```
 
-The suite covers streaming, non-streaming, multi-turn memory, tool-call
+The live half covers streaming, non-streaming, multi-turn memory, tool-call
 arguments, the full agent loop, real vision on a real generated image, token
 accounting, and error handling.
 
-It deliberately uses **flash-tier models** — the transport is what we're
-testing, and a bigger model costs credit without testing anything extra.
+The lifecycle half is **entirely offline** — it starts and kills real processes
+on real ports but never calls the API, so it is safe on every change and costs
+nothing. It concentrates on the failures that are invisible in normal use:
+
+- a bridge that is stopped when it should not have been
+- a bridge that ignores `SIGTERM` and holds its port
+- a second bridge forking beside the first and one of them orphaning
+- state left behind describing a pid that no longer exists
+- a foreign process squatting on the default port
+- `dispose` running twice, or with nothing to dispose
+- a cloud sandbox with no credentials
+
+It cleans up every process, port, and temp directory it creates, including when
+a test fails.
+
+Both halves use **flash-tier models** — the transport is what we're testing, and
+a bigger model costs credit without testing anything extra.
 
 ---
 

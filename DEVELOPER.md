@@ -1338,7 +1338,79 @@ asserting on the observable result.
 All four passed a "setup did not throw" check. The only reliable test is that
 the tool appears in an agent's tool list *and* that calling it returns content.
 
-#### 11.1.5 What the plugin is actually for
+#### 11.1.5 Teardown: the dispose contract
+
+The v2 loader runs whatever `setup` returns as its dispose callback. From the
+decompiled loader:
+
+```js
+// PluginModule.load -> the promise adapter
+yield*Mt(
+  ie(() => Promise.resolve(e.setup(de))),        // run setup
+  (re) => re ? ie(() => Promise.resolve(re())) : D  // run the returned fn on teardown
+)
+```
+
+So `setup` returning a function is not a convention, it is the contract. It is
+invoked when the plugin scope closes — on server shutdown, and on reload, where
+the old scope is closed before the new one is built:
+
+```ts
+Plugin.disable("x") -> close plugin scope -> ... -> Reload.all()
+```
+
+This is the only supported way to release something a plugin started. Without
+it, a bridge started in a sandbox outlives the session and holds a loopback
+port with nothing left to reap it.
+
+The rule that makes it safe to use:
+
+> A bridge is stopped **if and only if** this process started it.
+
+`stop()` refuses to touch a bridge whose pid was never recorded as ours, so a
+launchd agent or a bridge the user started in a terminal is never killed by
+plugin teardown. Ownership lives in `src/lifecycle.js` and is set in exactly one
+place — `start()`.
+
+#### 11.1.6 Cloud, containers, CI
+
+These differ from a desktop in three ways that all break naive assumptions:
+
+| | desktop | sandbox |
+|---|---|---|
+| `~/.commandcode/auth.json` | present | **absent** |
+| `~/.config/opencode` | persistent | thrown away |
+| supervision | launchd / systemd | **none** |
+
+`detectEnvironment()` in `src/lifecycle.js` classifies by *capability*, not by
+product name — every check is something testable:
+
+- credentials: `COMMAND_CODE_API_KEY`, else `~/.commandcode/auth.json`
+- persistent config: can `$HOME` be written to
+- supervision: `CMD_BRIDGE_SUPERVISED`
+
+`process.env` is corroboration only, never the sole basis for a decision, so a
+stale variable in a shell profile cannot change behaviour. `CI`,
+`OPENCODE_CLOUD`, and a missing/unwritable home are additional signals.
+
+Consequences in the plugin:
+
+1. **No credentials → register nothing.** The Go plan has no public API, so a
+   provider entry with no key can never answer. The plugin logs why and leaves
+   the catalog alone, instead of offering a `commandcode/...` model that always
+   fails.
+2. **Never detach in a sandbox.** A detached child outlives its parent. In
+   cloud the bridge is a tracked, non-detached child so plugin teardown can reap
+   it.
+3. **Do not repair config that is about to be deleted.** Drift is reported and
+   left alone when the config is not writable.
+
+**One credential can never be the whole story.** Because the plan has no
+provider API, the sandbox needs the user's key. That is a genuine constraint of
+this package, not an oversight, and it is why the plugin degrades to "explains
+itself" rather than pretending to work.
+
+#### 11.1.7 What the plugin is actually for
 
 Provider registration stays in `opencode.json`. It is deterministic,
 inspectable, version-independent, and survives any loader change. The plugin
@@ -1346,6 +1418,47 @@ handles what config cannot: noticing the bridge is down, reporting
 plan/credits/schema/drift on demand, and keeping the provider `baseURL` pointed
 at the live port.
 
+#### 11.1.8 Three bugs the lifecycle tests found in our own code
+
+Recorded because all three were invisible in normal use, and two were found
+only by asserting on an observable property rather than on a return value.
+
+**Every machine was classified as an ephemeral sandbox.** The writability probe
+wrote into `~/.commandcode-go-probe/probe` without ever creating that directory,
+so the write always threw, `configWritable` was always `false`, and therefore
+`kind` was always `"cloud"`. Nothing errored — the answer was just always wrong.
+On a real desktop it silently cost us the ability to detach and the config-drift
+repair.
+
+This one is worth dwelling on, because it was found by *reading the plugin's
+log on a live machine* ("environment: cloud" on a Mac that was plainly not a
+sandbox) and not by any test. The test that would have caught it asserts against
+the real filesystem rather than a stub, precisely so this class of bug cannot
+hide behind a mock again. A probe that is only ever run against injected values
+is not testing the probe.
+
+**`stop()` escalated to `SIGKILL` every time.** It polled `child.exitCode`
+behind `Atomics.wait`, which blocks the event loop — so Node never delivered the
+`'exit'` event, the "still running?" check always said yes, and every stop ended
+in `SIGKILL`. The visible symptom was `escalated: true` on a clean shutdown. The
+consequence was worse than a noisy log: `SIGKILL` cannot be trapped, so the
+bridge never ran its own exit handler, `clearState()` never ran, and the state
+file was left behind describing a dead pid — manufacturing the exact stale-state
+condition the code exists to prevent. Fixed by making `stop()` async and racing
+the `'exit'` event against a grace timer.
+
+**Readiness could adopt a stranger's bridge.** After spawning, the code polled
+`discoverPort()`, which returns *any* healthy bridge on the machine. With a
+second bridge already running — the normal case on a supervised machine — a
+freshly spawned child was declared healthy because of the *other* one, and the
+caller took ownership of a process it never started, later killing a bridge it
+had no business touching. `observeChild()` now requires the state file to name a
+live process that is the spawned child or a descendant of it.
+
+That last one is the more interesting class: a liveness check that answers a
+different question than the one being asked. "Is a bridge healthy?" and "is *my*
+bridge healthy?" are not the same question, and the code was silently asking the
+first while meaning the second.
 
 ### 11.2 The plan gate — who this is for
 
@@ -1413,14 +1526,40 @@ model work".
 ## 12. Testing
 
 ```bash
-npm test                    # 38 checks, live API
-npm test -- --offline       # structural only, zero requests, zero credit
+npm test                    # 51 live checks + 66 lifecycle checks
+npm test -- --offline       # 27 structural + all 61 lifecycle, zero requests, zero credit
 npm test -- --model <id>    # override the model under test
+node test/lifecycle.mjs     # the lifecycle suite alone; also free
 ```
 
-**Current status: 38 passed, 0 failed.** Verified stable over 4 consecutive runs.
+**Current status: 51 live + 66 lifecycle passed, 0 failed.**
 
-### 12.1 What is covered
+The suite is split in two on purpose.
+
+**`test/run-all.mjs` — the live half.** Needs a real account and makes real
+requests, so it is where transport fidelity is proven: streaming, non-streaming,
+multi-turn memory, tool-argument round-tripping, the full agent loop, real
+vision on a real generated PNG, and token accounting.
+
+**`test/lifecycle.mjs` — the offline half.** Starts and kills *real processes* on
+*real ports* but never calls the API, so it costs nothing and is safe on every
+change. It is a separate file because it binds ports and manipulates process
+state; interleaving that with in-flight requests makes any failure ambiguous.
+
+Two isolation details make the offline half safe to run against a live desktop
+setup, which is the situation it was actually written in:
+
+- `CMD_BRIDGE_STATE_DIR` points at a temp dir, so state assertions cannot delete
+  the real bridge's state file.
+- `start()` takes a `preflightPortModule` seam. A stub reporting "nothing
+  running" forces a genuine spawn instead of adopting the launchd-managed bridge
+  on 8787, while the post-spawn readiness check still uses the real port module.
+
+The lesson from writing it: **a test that runs on the same machine as the thing
+under test must be explicit about which world it is in.** The first version
+silently adopted the user's own bridge and "passed" while testing nothing.
+
+### 12.1 What the live half covers
 
 | Group | Checks |
 |---|---|
@@ -1433,6 +1572,7 @@ npm test -- --model <id>    # override the model under test
 | 4. multi-turn | memory survives translation (plant `7391`, ask for it back) |
 | 5. tools | tool call emitted; **arguments round-trip exactly**; `finish_reason=tool_calls`; full agent loop consumes the tool result |
 | 6. vision | reads `42`, reads `green`, reads `red` from a real PNG |
+| 8. lifecycle | the 66 checks in §12.3, run in both live and `--offline` modes |
 | 7. errors | missing model → 400 `invalid_request_error`; unknown route → 404 |
 
 ### 12.2 The vision fixture
@@ -1455,14 +1595,42 @@ signal you want from a test with known ground truth.
 
 Regenerate with `npm run fixture`.
 
-### 12.3 Model choice
+### 12.3 What the lifecycle half covers
+
+66 checks over six groups. The organising question is one property: **a bridge
+is stopped if and only if we started it.** Everything else serves that, or
+serves "never leak a process or a port".
+
+| Group | Checks |
+|---|---|
+| 1. environment | 10-way classification matrix (desktop / launchd-supervised / ephemeral home / CI / `OPENCODE_CLOUD` / no creds / missing home); cloud never allows a detached daemon; classification is idempotent |
+| 2. ownership | `stop()` with nothing owned is a no-op; `start()` **adopts** an already-serving bridge and does not claim it; missing bridge file refused; a child that exits immediately is reported, not half-registered; a timed-out start leaves no orphan; a `SIGTERM`-ignoring child is escalated to `SIGKILL` |
+| 3. real bridge | starts on a chosen free port; reports `started: true`; ownership recorded; `/health` answers; a **second start adopts rather than forks**; `stop()` succeeds; **port is released**; ownership cleared; a second `stop()` is a no-op |
+| 4. crash recovery | state records a dead pid; liveness is detectable via signal 0; `clearState()` removes the file; a live bridge publishes pid **and** port; a `SIGKILL`ed bridge is really gone; **stale state survives `SIGKILL`** and does not lie about liveness; the port is free anyway; a new bridge starts despite the stale file |
+| 5. foreign port | a squatter on the requested port makes the bridge scan to the next one; **the squatter is left untouched** |
+| 6. plugin contract | default export is an object with `id` + `setup`; **`setup` returns a dispose function**; tool registered; `input` is a JSON Schema with `additionalProperties: false`; `execute` returns `{ content: string }`; `detail:"full"` dumps the schema; no session hook registered with a bogus signature; **`dispose` is safe with nothing owned and is idempotent** |
+
+Group 4 deserves a note. `SIGKILL` cannot be trapped, so a hard-killed bridge
+cannot clear its own state file. That is precisely why the state file records a
+**pid**, and why every consumer checks liveness rather than trusting the file's
+existence. It is a real, reproducible failure mode — not a hypothetical.
+
+Group 5 uses a TCP listener that accepts connections and never speaks HTTP. The
+bridge's own `canBind` must treat it as occupied, and the test then verifies the
+squatter is still reachable afterwards, i.e. nothing bound over it.
+
+The suite removes every process, port, state directory, and temp directory it
+creates — including after a failure, so a red run still leaves the machine as it
+found it.
+
+### 12.4 Model choice
 
 Tests use **flash-tier** models (`deepseek-v4.1-flash` by default). Pro and
 K3-class models cost materially more on a credit-metered plan and buy nothing
 for transport testing — the bridge's job is to move bytes faithfully, not to be
 smart. Override with `--model` if you want to verify a specific model.
 
-### 12.4 Test-harness pitfalls worth knowing
+### 12.5 Test-harness pitfalls worth knowing
 
 **The AI SDK can strip tool schemas.** In `@ai-sdk/openai-compatible@2.0.80`
 with `ai@6.0.296`, a tool's `parameters` can arrive at the bridge as

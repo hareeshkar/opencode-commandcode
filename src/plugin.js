@@ -34,7 +34,6 @@
  *     plan, credits, discovered schema and config drift on demand.
  */
 
-import { spawn } from "node:child_process"
 import { appendFileSync, existsSync, readFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -59,7 +58,6 @@ const load = (rel) => import(new URL(`../${rel}`, import.meta.url).href)
 
 const HOST = process.env.CMD_BRIDGE_HOST || "127.0.0.1"
 const BRIDGE_MAIN = path.join(REPO, "src", "bridge.js")
-const RESTART_COOLDOWN_MS = 10_000
 
 // ------------------------------------------------------------------ logging
 
@@ -82,58 +80,35 @@ function readArtifact(name, fallback) {
 }
 
 // ----------------------------------------------------------- bridge control
+//
+// All of this lives in lifecycle.js so the plugin, the CLI and the tests share
+// one implementation. The plugin's job is to call it and to clean up on exit —
+// not to reimplement process management.
 
-let child = null
-let lastStart = 0
-let disabled = false
+const lifecycle = await load("src/lifecycle.js")
+
+let envInfo = null
 
 async function isUp(timeoutMs = 1500) {
   try {
-    const { discoverPort, isServing } = await load("src/port.js")
-    const found = await discoverPort({ host: HOST })
-    return found ? await isServing(found.port, HOST, timeoutMs) : false
+    return Boolean(await lifecycle.probeBridge({ host: HOST, timeoutMs }))
   } catch { return false }
 }
 
 async function currentBaseURL() {
   try {
-    const { discoverPort } = await load("src/port.js")
-    const found = await discoverPort({ host: HOST })
+    const found = await lifecycle.probeBridge({ host: HOST })
     return found ? `http://${HOST}:${found.port}/v1` : null
   } catch { return null }
 }
 
 async function ensureBridge() {
-  if (disabled) return false
-  if (await isUp()) return true
-
-  if (!existsSync(BRIDGE_MAIN)) {
-    log(`bridge not found at ${BRIDGE_MAIN}; install with: npm i -g opencode-commandcode-go`)
-    disabled = true
-    return false
-  }
-
-  const now = Date.now()
-  if (now - lastStart < RESTART_COOLDOWN_MS) return false
-  lastStart = now
-
-  try {
-    child = spawn(process.execPath, [BRIDGE_MAIN], { detached: true, stdio: "ignore", env: process.env })
-    child.unref()
-  } catch (e) {
-    log(`failed to spawn bridge: ${e.message}`)
-    return false
-  }
-
-  for (let i = 0; i < 24; i++) {
-    await new Promise((r) => setTimeout(r, 250))
-    if (await isUp(1000)) {
-      log(`bridge up at ${await currentBaseURL()}`)
-      return true
-    }
-  }
-  log("bridge did not become healthy in time")
-  return false
+  if (envInfo && !envInfo.hasCredentials) return false
+  const r = await lifecycle.start({ bridgeMain: BRIDGE_MAIN, host: HOST, envInfo })
+  if (!r.ok) log(`bridge not started: ${r.reason}`)
+  else if (r.started) log(`bridge started on ${r.baseURL} (owned by this process)`)
+  else log(`bridge already serving on ${r.baseURL} (not started by us; will not be stopped)`)
+  return r.ok
 }
 
 // ------------------------------------------------------------- the status tool
@@ -255,19 +230,40 @@ export default {
       log(`tool registration failed: ${e.message}`)
     }
 
+    // 0a. Classify the environment before doing anything that could leave a
+    //     process or a file behind.
+    //
+    //     In a cloud sandbox there is no ~/.commandcode/auth.json and no
+    //     persistent config, so the bridge only works if the operator injected
+    //     COMMAND_CODE_API_KEY. Without it we say so and register nothing,
+    //     rather than leaving a provider in the catalog that can never answer.
+    envInfo = lifecycle.detectEnvironment()
+    log(`environment: ${envInfo.kind} (${envInfo.reasons.join("; ") || "defaults"})`)
+
+    if (!envInfo.hasCredentials) {
+      log(
+        "no Command Code credentials found. In a cloud sandbox set COMMAND_CODE_API_KEY; " +
+          "on a local machine run `commandcode login`. The provider will not be registered.",
+      )
+    }
+
     // 1. Bring the bridge up before anything tries to use it.
-    const up = await ensureBridge()
+    const up = envInfo.hasCredentials ? await ensureBridge() : false
     if (up) {
       const base = await currentBaseURL()
       const { checkDrift } = await load("src/config-sync.js")
       const port = base ? Number(base.match(/:(\d+)\/v1$/)?.[1]) : undefined
-      const drift = port ? checkDrift({ port, host: HOST }) : null
+      // In a sandbox the config is ephemeral, so drift is not actionable and
+      // repairing it is pointless work. Report and move on.
+      const drift = port && envInfo.configWritable ? checkDrift({ port, host: HOST }) : null
       if (drift && !drift.inSync) {
         log(`config drift: ${drift.note} (run: opencode-cc-go sync)`)
       } else if (drift) {
         log(`bridge ready at ${base}; config in sync`)
+      } else if (base) {
+        log(`bridge ready at ${base}`)
       }
-    } else {
+    } else if (envInfo.hasCredentials) {
       log("bridge unavailable at startup; the provider will fail until it recovers")
     }
 
@@ -290,12 +286,36 @@ export default {
 
     // 3. (tool registration happens at step 0, before any await — see above)
 
-    // 4. Liveness beyond startup is handled by the launchd agent
-    //    (`opencode-cc-go service`), which restarts the bridge on crash. An
-    //    earlier version of this file also tried to watch sessions from inside
-    //    the plugin, but ctx.session.hook takes (eventName, handler) and was
-    //    being called with a bare function, so it silently did nothing while
-    //    still logging success. Deliberately not reimplemented on a guess.
-    log("bridge supervision delegated to the launchd agent")
+    // 3. (tool registration happens at step 0, before any await — see above)
+
+    // 4. Return a teardown function.
+    //
+    //    The v2 loader runs whatever `setup` returns as the dispose callback:
+    //
+    //        const dispose = await module.default.setup(ctx)
+    //        // ...later, on plugin reload or server shutdown:
+    //        await dispose?.()
+    //
+    //    This is what stops the bridge when OpenCode closes. Without it a
+    //    sandbox run leaves a process holding a loopback port with nothing left
+    //    to reap it.
+    //
+    //    Two rules keep this safe:
+    //      - only a bridge THIS process started is stopped. A launchd-managed
+    //        bridge, or one the user started in a terminal, is left alone.
+    //      - the state file is cleared by the bridge's own exit handler, so we
+    //        do not delete a file describing a process that is still running.
+    return async function dispose() {
+      if (!lifecycle.ownsBridge()) {
+        log("dispose: bridge was not started by us; leaving it running")
+        return
+      }
+      const r = await lifecycle.stop()
+      log(
+        r.stopped
+          ? `dispose: stopped bridge on port ${r.port}${r.escalated ? " (SIGKILL escalation)" : ""}`
+          : `dispose: could not stop bridge: ${r.reason}`,
+      )
+    }
   },
 }
