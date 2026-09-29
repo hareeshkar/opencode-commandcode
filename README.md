@@ -281,7 +281,8 @@ technique in detail.
 |---|---|
 | `opencode-cc-go install` | register the provider in OpenCode |
 | `opencode-cc-go status` | health, plan, credits, model count |
-| `opencode-cc-go doctor` | diagnose a broken setup |
+| `opencode-cc-go doctor` | diagnose a broken setup (fails loudly on drift) |
+| `opencode-cc-go sync` | re-point OpenCode's config at the live bridge |
 | `opencode-cc-go start` | run the bridge in the foreground |
 | `opencode-cc-go models` | list models (`--vision` for image-capable only) |
 | `opencode-cc-go schema` | print the discovered API contract |
@@ -323,6 +324,8 @@ should not need babysitting:
 | You are on a plan with a real API | the installer **refuses** and shows you the direct config instead |
 | Model retired or plan-gated | filtered out by `opencode-cc-go models`; never advertised if unusable |
 | Stale state file from a crash | detected via dead pid, deleted rather than trusted |
+| Bridge restarts onto a new port | rewrites OpenCode's `baseURL` atomically, and tells you to restart OpenCode |
+| Config hand-edited or reverted | `doctor` reports the drift and fails; `sync` repairs it |
 
 Health checks are non-blocking: `opencode-cc-go status` answers in ~40 ms even
 when Command Code's API is slow, because local liveness and upstream reachability

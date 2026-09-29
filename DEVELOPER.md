@@ -48,6 +48,7 @@ Four things in one zero-dependency Node package:
 | **Translation layer** | `src/translate.js` | Pure functions: OpenAI ⇄ wire, no I/O, fully unit-testable |
 | **Plan classifier** | `src/plan.js` | Side-effect-free: "is this user on the $1 Go plan, or do they already have an API?" |
 | **Port manager** | `src/port.js` | Auto-selects a free port, publishes it via a state file, discovers it again |
+| **Config sync** | `src/config-sync.js` | Rewrites OpenCode's `baseURL` when the port changes, atomically and surgically |
 | **Plugin** | `src/plugin.js` | OpenCode hook package: injects the provider, supervises the bridge |
 | **Installer** | `scripts/install.js` | Writes the provider into `opencode.json` (the reliable path) |
 
@@ -1003,7 +1004,118 @@ looks exactly like "the bridge died".
 `SIGINT`/`SIGTERM`/`exit` all clear the state file, so a normal stop never
 leaves a trap behind.
 
-### Verified
+### The port must not drift — and for a while it did
+
+Auto-selecting a port introduces a second source of truth. The port lives in a
+runtime decision; the `baseURL` OpenCode reads lives in a static file. Those
+drift apart the moment the bridge restarts elsewhere.
+
+This was a real defect, found by testing rather than reasoning:
+
+```
+$ lsof -ti:8787 | xargs kill -9     # a foreign process takes 8787
+$ opencode-cc-go start
+opencode-commandcode-go bridge on http://127.0.0.1:8788  [port 8788 chosen: scanned]
+                                          # …and nothing else happened
+
+$ opencode run -m commandcode/deepseek/deepseek-v4.1-flash "say OK"
+Error: ConnectionRefused: Unable to connect.
+```
+
+`opencode.json` still said `8787`. The installer had written that once, at
+install time, and nothing ever revisited it. The bridge had moved; nothing
+else had.
+
+#### The fix: correct the drift where it is created
+
+The bridge knows its own port the instant it binds, so it is the only component
+positioned to fix this. `src/config-sync.js` runs immediately after `listen()`
+and rewrites the config if — and only if — the URL actually changed.
+
+```
+opencode-commandcode-go bridge on http://127.0.0.1:8788  (49 models, cli 1.69.0)
+  opencode.json baseURL updated: http://127.0.0.1:8787/v1 -> http://127.0.0.1:8788/v1
+  restart OpenCode to pick up the new port.
+```
+
+`opencode run` then works immediately, with no manual step.
+
+#### Safety properties
+
+Writing to a user's editor config deserves more care than a `fs.writeFile`:
+
+| Property | How |
+|---|---|
+| Atomic | write a temp file beside the target, then `rename()` over it — a crash mid-write cannot truncate a config |
+| Surgical | only `provider.commandcode.options.baseURL` is assigned; every other provider, model and key is preserved |
+| Refuses to guess | a config that is not valid JSON is reported and left byte-for-byte alone |
+| Backs up first | `<config>.bak`, written once, before the first mutation |
+| Idempotent | already-correct is a no-op, so the common path touches nothing |
+| Opt-out | `CMD_NO_CONFIG_SYNC=1` for users who manage `opencode.json` from a dotfile repo |
+| Non-creating | if no config exists, none is written |
+
+Verified with an automated test that corrupts a config by hand:
+
+```
+$ opencode-cc-go status
+  opencode.json OUT OF SYNC  config points at http://127.0.0.1:9999/v1 but the bridge is on http://127.0.0.1:8788/v1
+
+$ opencode-cc-go doctor ; echo $?
+config points at http://127.0.0.1:9999/v1 but the bridge is on http://127.0.0.1:8788/v1
+Fix it with:  opencode-cc-go sync
+1
+
+$ opencode-cc-go sync
+updated /Users/hareeshkarravi/.config/opencode/opencode.json
+  http://127.0.0.1:9999/v1 -> http://127.0.0.1:8788/v1
+
+$ opencode-cc-go doctor ; echo $?
+all good
+0
+```
+
+After the repair, the 4 other providers, 49 models and 39 agent definitions in
+the user's config were all still present.
+
+#### Defence in depth
+
+Self-healing covers the common case. Two more layers catch the rest:
+
+- **`/health` reports drift** (`config.inSync`, `config.note`), so any client
+  can ask.
+- **`doctor` fails loudly** with a non-zero exit and the exact fix command,
+  rather than letting a connection error be the first symptom.
+- **`opencode-cc-go sync`** is the one-shot repair, for cases the bridge cannot
+  self-heal: a hand-edited config, or a dotfile manager that reverted it.
+
+#### The one limit, stated plainly
+
+**OpenCode reads its config once, at startup.** If the bridge changes port
+while OpenCode is already running, the running instance keeps the old URL until
+it restarts. The bridge says so explicitly rather than letting it surface as a
+mystery:
+
+```
+  opencode.json baseURL updated: ... -> ...
+  restart OpenCode to pick up the new port.
+```
+
+This is an OpenCode architecture constraint, not something this package can
+engineer around. The plugin path has no such window — its `config` hook calls
+`discoverPort()` during OpenCode's own startup, so the URL is correct before any
+request is made — but plugins do not initialise on every build (§11.1), which is
+exactly why the installer-plus-self-heal design exists.
+
+#### Why not just pin the port?
+
+Because a pinned port means a package installed with one command cannot start
+if anything else on the machine already holds it, and the "fix" becomes a manual
+`lsof`/`kill` ritual. Auto-selection is the right behaviour; the config simply
+has to follow it. Note the asymmetry that makes this cheap in practice: the
+port only changes when the bridge *restarts*, and the common case — nothing
+else on 8787 — never changes at all, so the sync path is a no-op.
+
+#### Verified
 
 With a foreign process squatting on 8787 for the whole run:
 

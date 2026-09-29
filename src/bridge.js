@@ -26,6 +26,7 @@ import { fileURLToPath } from "node:url"
 import { toWire, toWireTools, finishMap, toOpenAIUsage } from "./translate.js"
 import { classifyPlan, fetchPlanId } from "./plan.js"
 import { findAvailablePort, writeState, clearState, isServing, localAddresses, DEFAULT_PORT } from "./port.js"
+import { syncBaseURL, checkDrift } from "./config-sync.js"
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, "..")
@@ -427,6 +428,7 @@ async function health(url) {
     },
     upstreamCheckedAt: upstreamCache.value ? new Date(upstreamCache.at).toISOString() : null,
     upstreamFresh: Date.now() - upstreamCache.at < UPSTREAM_TTL_MS,
+    config: { ...checkDrift({ port: PORT, host: HOST }) },
   }
 }
 
@@ -530,5 +532,26 @@ if (process.env.CMD_BRIDGE_NO_LISTEN !== "1") {
       `opencode-commandcode-go bridge on http://${HOST}:${PORT}  ` +
         `(${(CATALOG.models || []).length} models, cli ${cliVersion()})${extra}\n`,
     )
+
+    // Keep OpenCode's config pointed at wherever we actually landed. Without
+    // this, an auto-selected port is a silent breakage: opencode.json keeps the
+    // old baseURL and every request fails with a bare ConnectionRefused.
+    // Set CMD_NO_CONFIG_SYNC=1 to opt out (e.g. when OpenCode config is
+    // managed declaratively by a dotfile repo you do not want touched).
+    if (process.env.CMD_NO_CONFIG_SYNC === "1") {
+      process.stderr.write("  config sync disabled (CMD_NO_CONFIG_SYNC=1)\n")
+      return
+    }
+    const r = syncBaseURL({ port: PORT, host: HOST })
+    if (r.changed) {
+      process.stderr.write(
+        `  opencode.json baseURL updated: ${r.from} -> ${r.to}\n` +
+          `  restart OpenCode to pick up the new port.\n`,
+      )
+    } else if (r.reason.startsWith("already correct") || r.reason.includes("no 'commandcode' provider")) {
+      // nothing to say
+    } else {
+      process.stderr.write(`  config sync skipped: ${r.reason}\n`)
+    }
   })
 }

@@ -25,12 +25,12 @@ const HOST = process.env.CMD_BRIDGE_HOST || "127.0.0.1"
 // The bridge auto-selects a free port, so never assume 8787 -- ask. Resolved
 // before any route is contacted.
 let PORT = Number(process.env.CMD_BRIDGE_PORT || 8787)
-{
-  const { discoverPort } = await import(new URL("../src/port.js", import.meta.url).href)
-  if (!process.env.CMD_BRIDGE_PORT) {
-    const found = await discoverPort({ host: HOST })
-    if (found) PORT = found.port
-  }
+const { discoverPort } = await import(new URL("../src/port.js", import.meta.url).href)
+const { syncBaseURL, checkDrift, defaultConfigPath } =
+  await import(new URL("../src/config-sync.js", import.meta.url).href)
+if (!process.env.CMD_BRIDGE_PORT) {
+  const found = await discoverPort({ host: HOST })
+  if (found) PORT = found.port
 }
 
 const read = (n, f) => {
@@ -80,6 +80,12 @@ if (cmd === "status" || cmd === "doctor") {
     console.log(`  plan          ${line}`)
   }
   console.log(`  bridge        ${h ? c.g("healthy") : c.r("unreachable")}  (http://${HOST}:${PORT})`)
+  const drift = checkDrift({ port: PORT, host: HOST })
+  if (drift.inSync) {
+    console.log(`  opencode.json ${c.g("in sync")}  ${c.d(drift.configured)}`)
+  } else {
+    console.log(`  opencode.json ${c.y("OUT OF SYNC")}  ${c.d(drift.note)}`)
+  }
   if (h) {
     console.log(`  upstream      ${h.upstream?.reachable ? c.g("reachable") : c.r("unreachable")}  ${c.d(h.upstream?.base || "")}`)
     if (h.upstream?.user) console.log(`  account       ${h.upstream.user}`)
@@ -102,13 +108,34 @@ if (cmd === "status" || cmd === "doctor") {
   const vision = (catalog.models || []).filter((m) => m.inputModalities?.includes("image"))
   console.log(`  modalities    ${(parts.inputModalitiesOverall || []).join(", ") || "text, image"}`)
   console.log(`  vision models ${vision.length} of ${(catalog.models || []).length}`)
-  if (cmd === "doctor" && !h) {
-    console.log(c.y("\n  Bridge is down. Start it with:  npm run bridge"))
-    process.exit(1)
+  if (cmd === "doctor") {
+    let bad = false
+    if (!h) {
+      console.log(c.y("\n  Bridge is down. Start it with:  opencode-cc-go start"))
+      bad = true
+    }
+    if (!drift.inSync) {
+      console.log(c.y(`\n  ${drift.note}`))
+      console.log(`  Fix it with:  opencode-cc-go sync`)
+      if (h) bad = true
+    }
+    if (bad) process.exit(1)
+    console.log(c.g("\n  all good"))
   }
 } else if (cmd === "start") {
   const p = spawn(process.execPath, [path.join(REPO, "src", "bridge.js")], { stdio: "inherit", env: { ...process.env, CMD_BRIDGE_PORT: String(PORT) } })
   p.on("exit", (code) => process.exit(code ?? 0))
+} else if (cmd === "sync") {
+  // One-shot repair for drift the bridge could not fix itself, e.g. the config
+  // was edited by hand, or a dotfile manager reverted it.
+  const r = syncBaseURL({ port: PORT, host: HOST })
+  if (r.changed) {
+    console.log(c.g(`updated ${defaultConfigPath()}`))
+    console.log(`  ${r.from} -> ${r.to}`)
+    console.log(c.d("  restart OpenCode if it is currently running"))
+  } else {
+    console.log(r.reason === "already correct" ? c.g("already in sync") : c.y(r.reason))
+  }
 } else if (cmd === "models") {
   const only = flag("--vision")
   for (const m of catalog.models || []) {
@@ -144,6 +171,6 @@ if (cmd === "status" || cmd === "doctor") {
   }
   console.log(c.g("\ndiscovery complete"))
 } else {
-  console.log(`usage: opencode-cc-go <status|doctor|start|models|schema|discover>`)
+  console.log(`usage: opencode-cc-go <status|doctor|sync|start|models|schema|discover>`)
   process.exit(1)
 }

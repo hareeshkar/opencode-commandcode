@@ -207,6 +207,71 @@ async function main() {
     ok("an unknown plan is not guessed", classifyPlan("mystery-tier").needsBridge === null)
   }
 
+  // ---- 0a-ii. config sync: the port must never be allowed to drift
+  console.log(C.bold("\n0a-ii. config sync (no API cost)"))
+  {
+    const { syncBaseURL, checkDrift, currentBaseURL } =
+      await import(new URL("../src/config-sync.js", import.meta.url).href)
+    const { mkdtempSync, writeFileSync, readFileSync, rmSync } = await import("node:fs")
+    const { tmpdir } = await import("node:os")
+    const nodePath = await import("node:path")
+
+    const dir = mkdtempSync(nodePath.join(tmpdir(), "ccgo-cfg-"))
+    const file = nodePath.join(dir, "opencode.json")
+    const seed = {
+      $schema: "https://opencode.ai/config.json",
+      provider: {
+        other: { npm: "x", options: { baseURL: "https://example.test" } },
+        commandcode: { npm: "@ai-sdk/openai-compatible", options: { baseURL: "http://127.0.0.1:1/v1" }, models: { a: {} } },
+      },
+      agent: { keep: { mode: "subagent" } },
+    }
+    writeFileSync(file, JSON.stringify(seed, null, 2))
+
+    ok("currentBaseURL reads the configured value", currentBaseURL(file) === "http://127.0.0.1:1/v1")
+
+    // drift is detected
+    const d0 = checkDrift({ port: 9998, file })
+    ok("drift is detected", d0.inSync === false && d0.configured === "http://127.0.0.1:1/v1", d0.note)
+
+    // dry run must not write
+    const dry = syncBaseURL({ port: 9998, file, dryRun: true })
+    ok("dry run reports a change but writes nothing",
+      dry.changed === true && currentBaseURL(file) === "http://127.0.0.1:1/v1")
+
+    // real sync updates only our provider
+    const r1 = syncBaseURL({ port: 9998, file })
+    ok("sync updates the baseURL", r1.changed && currentBaseURL(file) === "http://127.0.0.1:9998/v1",
+      `${r1.from} -> ${r1.to}`)
+
+    const after = JSON.parse(readFileSync(file, "utf8"))
+    ok("other providers are untouched", after.provider.other.options.baseURL === "https://example.test")
+    ok("our model list is preserved", Object.keys(after.provider.commandcode.models).length === 1)
+    ok("unrelated top-level keys are preserved", !!after.agent?.keep && after.$schema)
+
+    // idempotent: a second call is a no-op
+    const r2 = syncBaseURL({ port: 9998, file })
+    ok("a second sync is a no-op", r2.changed === false && r2.reason === "already correct")
+
+    // a corrupt config must be refused, not overwritten
+    writeFileSync(file, "{ this is not json")
+    const r3 = syncBaseURL({ port: 9998, file })
+    ok("a malformed config is refused, not clobbered", r3.changed === false, r3.reason.slice(0, 60))
+    ok("the malformed file is left exactly as it was",
+      readFileSync(file, "utf8") === "{ this is not json")
+
+    // a config with no commandcode provider is left alone
+    writeFileSync(file, JSON.stringify({ provider: { other: {} } }))
+    const r4 = syncBaseURL({ port: 9998, file })
+    ok("a config without our provider is left alone", r4.changed === false, r4.reason)
+
+    // a missing file is not created
+    const r5 = syncBaseURL({ port: 9998, file: nodePath.join(dir, "nope.json") })
+    ok("a missing config is not created", r5.changed === false, r5.reason)
+
+    rmSync(dir, { recursive: true, force: true })
+  }
+
   // ---- 0b. static artifact integrity (always runs, costs nothing)
   console.log(C.bold("\n0b. generated artifacts"))
   const cat = readCatalog(), sch = readSchema(), parts = readParts()
