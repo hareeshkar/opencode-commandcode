@@ -1,0 +1,71 @@
+{
+  "name": "opencode-commandcode",
+  "version": "1.0.0",
+  "description": "Use your Command Code (commandcode.ai) $1 Go plan inside OpenCode as a native provider, with self-discovered models, vision routing and a self-healing local bridge.",
+  "type": "module",
+  "main": "./src/plugin.js",
+  "exports": {
+    ".": "./src/plugin.js",
+    "./bridge": "./src/bridge.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "opencode-commandcode": "./bin/opencode-commandcode.js"
+  },
+  "files": [
+    "DEVELOPER.md",
+    "LICENSE",
+    "README.md",
+    "bin",
+    "catalog.extracted.json",
+    "catalog.json",
+    "catalog.reachability.json",
+    "envelope.generated.json",
+    "parts.generated.json",
+    "schema.generated.json",
+    "scripts",
+    "scripts/install.js",
+    "src"
+  ],
+  "scripts": {
+    "bridge": "node src/bridge.js",
+    "status": "node bin/opencode-commandcode.js status",
+    "doctor": "node bin/opencode-commandcode.js doctor",
+    "catalog": "node scripts/extract-catalog.mjs > catalog.extracted.json && node scripts/build-catalog.mjs",
+    "catalog:probe": "node scripts/extract-catalog.mjs > catalog.extracted.json && node scripts/build-catalog.mjs --probe",
+    "schema": "node scripts/extract-envelope.mjs && node scripts/probe-schema.mjs",
+    "parts": "node scripts/probe-parts.mjs",
+    "discover": "npm run catalog && npm run schema && npm run parts",
+    "fixture": "node test/make-fixture-image.mjs",
+    "test": "node test/run-all.mjs",
+    "install": "node scripts/install.js",
+    "uninstall": "node scripts/install.js --remove"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "commandcode",
+    "command-code",
+    "ai",
+    "provider",
+    "bridge",
+    "vision",
+    "deepseek",
+    "openai-compatible"
+  ],
+  "license": "MIT",
+  "author": "hareeshkar",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hareeshkar/opencode-commandcode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hareeshkar/opencode-commandcode/issues"
+  },
+  "homepage": "https://github.com/hareeshkar/opencode-commandcode#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

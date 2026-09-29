@@ -1,0 +1,73 @@
+# ---- secrets & credentials -------------------------------------------------
+# Never commit a Command Code API key. `cmd auth login` writes this file.
+auth.json
+.commandcode/
+*.key
+*.pem
+.env
+.env.*
+!.env.example
+
+# The probe scripts read the key from here; it must stay out of git.
+secrets/
+
+# ---- generated discovery artifacts ----------------------------------------
+# These are regenerated from the live API and the installed CLI:
+#
+#   npm run catalog   -> catalog.extracted.json, catalog.reachability.json, catalog.json
+#   npm run schema    -> envelope.generated.json, schema.generated.json
+#   npm run parts     -> parts.generated.json
+#
+# They are committed on purpose: they are the *shipped* model catalog and
+# protocol description, and the bridge reads them at runtime. If you would
+# rather regenerate on install, uncomment the block below -- but then the
+# package cannot start without network access to Command Code.
+#
+# catalog.reachability.json is a live probe result for ONE account and one plan.
+# It leaks which models your specific plan can reach, so it is NOT committed.
+catalog.reachability.json
+
+# Uncomment to treat all discovery output as build-time only:
+# catalog.json
+# catalog.extracted.json
+# schema.generated.json
+# envelope.generated.json
+# parts.generated.json
+
+# ---- node ------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+*.tsbuildinfo
+
+# ---- test & coverage -------------------------------------------------------
+coverage/
+.nyc_output/
+test-results/
+*.lcov
+
+# ---- local runtime ---------------------------------------------------------
+*.log
+*.pid
+.DS_Store
+Thumbs.db
+
+# ---- editors ---------------------------------------------------------------
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- build output ----------------------------------------------------------
+dist/
+build/
+out/
+*.tgz
+
+# ---- temp ------------------------------------------------------------------
+tmp/
+.cache/
