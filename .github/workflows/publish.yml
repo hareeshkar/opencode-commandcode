@@ -21,7 +21,7 @@ on:
     tags: ['v*']
   workflow_dispatch:
     inputs:
-      dry-run:
+      dry_run:
         description: 'Pack and verify without publishing'
         type: boolean
         default: true
@@ -63,10 +63,10 @@ jobs:
           "
 
       - name: publish
-        if: ${{ inputs.dry-run != 'true' }}
+        if: ${{ inputs.dry_run != 'true' }}
         run: npm publish --access public --provenance
 
       - name: done (dry run)
-        if: ${{ inputs.dry-run == 'true' }}
+        if: ${{ inputs.dry_run == 'true' }}
         run: >-
           echo "dry run - nothing published. Tag v1.0.0 and push to publish."

@@ -15,6 +15,11 @@ jobs:
       matrix:
         node: ['20', '22', '24']
 
+    env:
+      # Step-level `if:` cannot read the secrets context, so expose the
+      # presence of a key as a job-level env and branch on that.
+      HAS_CC_KEY: ${{ secrets.COMMAND_CODE_API_KEY != '' }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -65,5 +70,5 @@ jobs:
       # here: CI has no key, and the plan/credit limits make a shared secret the
       # wrong design. Maintainers run `npm test` locally before tagging.
       - name: live suite (skipped without credentials)
-        if: ${{ secrets.COMMAND_CODE_API_KEY != '' }}
+        if: env.HAS_CC_KEY == 'true'
         run: node test/run-all.mjs
