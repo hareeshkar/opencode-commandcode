@@ -1,0 +1,71 @@
+name: publish
+
+# Publishes to npm using OIDC "trusted publishing": npm issues a short-lived
+# token in exchange for a GitHub Actions OIDC identity. There is no long-lived
+# npm token stored in this repository, and nothing to leak.
+#
+# ONE-TIME SETUP (npmjs.com, must be done by the package owner):
+#   1. create the package:  npm publish --access public   (once, by hand)
+#      OR create it at https://www.npmjs.com/package/opencode-commandcode-go
+#   2. open the package -> Settings -> Trusted Publisher
+#   3. add:  provider = GitHub Actions
+#           org/user = hareeshkar
+#           repo    = opencode-commandcode
+#           workflow= publish.yml
+#           environment = (leave empty unless you create one)
+#
+# After that, pushing a v* tag publishes automatically.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: 'Pack and verify without publishing'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write   # required for OIDC
+
+jobs:
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-latest
+    environment: npm   # remove this line in repo settings if no environment is used
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: install (no runtime dependencies expected)
+        run: npm install --package-lock-only
+
+      - name: verify (offline suite)
+        run: node test/run-all.mjs --offline
+
+      - name: pack contents check
+        run: |
+          npm pack --dry-run --json > pack.json
+          node -e "
+            const files = require('./pack.json')[0].files.map(f => f.path)
+            if (files.includes('catalog.reachability.json')) {
+              console.error('catalog.reachability.json must not be published')
+              process.exit(1)
+            }
+            console.log('tarball OK:', files.length, 'files')
+          "
+
+      - name: publish
+        if: ${{ inputs.dry-run != 'true' }}
+        run: npm publish --access public --provenance
+
+      - name: done (dry run)
+        if: ${{ inputs.dry-run == 'true' }}
+        run: echo "dry run: nothing published. Tag v1.0.0 and push to publish."

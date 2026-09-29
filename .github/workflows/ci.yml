@@ -1,0 +1,69 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # No dependencies to install -- the package is zero-dependency by design.
+      # This step exists to prove that stays true.
+      - name: verify zero runtime dependencies
+        run: |
+          deps=$(node -e "const p=require('./package.json');console.log(Object.keys(p.dependencies||{}).length)")
+          echo "runtime dependencies: $deps"
+          [ "$deps" = "0" ] || { echo "::error::runtime dependencies must stay at 0"; exit 1; }
+
+      - name: syntax check every source file
+        run: |
+          set -e
+          for f in src/*.js scripts/*.js scripts/*.mjs bin/*.js test/*.mjs; do
+            node --check "$f"
+            echo "  ok  $f"
+          done
+
+      - name: static + port + plan tests (no network, no credit cost)
+        run: node test/run-all.mjs --offline
+
+      - name: package contents are correct
+        run: |
+          npm pack --dry-run --json > pack.json
+          node -e "
+            const files = require('./pack.json')[0].files.map(f => f.path)
+            const need = [
+              'src/bridge.js','src/translate.js','src/plan.js','src/port.js',
+              'bin/opencode-cc-go.js','catalog.json','schema.generated.json',
+              'parts.generated.json','envelope.generated.json','README.md','LICENSE',
+            ]
+            const missing = need.filter(f => !files.includes(f))
+            if (missing.length) { console.error('missing from tarball:', missing); process.exit(1) }
+            // A live probe for one account must never ship: it reveals the tier.
+            if (files.includes('catalog.reachability.json')) {
+              console.error('catalog.reachability.json must not be published')
+              process.exit(1)
+            }
+            console.log('tarball OK:', files.length, 'files')
+          "
+
+      # The live suite needs a Command Code account. It is intentionally NOT run
+      # here: CI has no key, and the plan/credit limits make a shared secret the
+      # wrong design. Maintainers run `npm test` locally before tagging.
+      - name: live suite (skipped without credentials)
+        if: ${{ secrets.COMMAND_CODE_API_KEY != '' }}
+        run: node test/run-all.mjs
