@@ -10,7 +10,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "opencode-cc-go": "./bin/opencode-cc-go.js"
+    "opencode-cc-go": "bin/opencode-cc-go.js"
   },
   "files": [
     "!catalog.reachability.json",
