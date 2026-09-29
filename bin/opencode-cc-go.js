@@ -13,7 +13,7 @@
  */
 
 import { spawn } from "node:child_process"
-import { readFileSync, existsSync } from "node:fs"
+import { readFileSync, existsSync, statSync, openSync, readSync, closeSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -49,6 +49,57 @@ async function health() {
     const r = await fetch(`http://${HOST}:${PORT}/health`, { signal: ac.signal }); clearTimeout(t)
     return await r.json()
   } catch { return null }
+}
+
+/**
+ * Config keys OpenCode discarded as legacy, read from its own log.
+ *
+ * These produce no error anywhere else: the config parses, requests succeed, and
+ * the setting is simply never applied. The only trace is a
+ * "configuration normalization diagnostic" WARN, so that is what we read.
+ *
+ * Only the tail of the log is scanned — the file grows without bound — and
+ * only entries NEWER than the config file are considered. Without that scope the
+ * check reports problems that were already fixed, because the log is append-only
+ * and a corrected config leaves the old warnings behind forever.
+ */
+function droppedConfigKeys(providerId = "commandcode") {
+  const logPath = path.join(
+    process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"),
+    "opencode", "log", "opencode.log",
+  )
+  let text
+  try {
+    // Warnings describe the config as it was when OpenCode read it, so anything
+    // older than the config's own mtime is describing a superseded version.
+    const since = statSync(defaultConfigPath()).mtimeMs
+    const fd = openSync(logPath, "r")
+    const len = statSync(logPath).size
+    const start = Math.max(0, len - 2 * 1024 * 1024)
+    const buf = Buffer.alloc(len - start)
+    readSync(fd, buf, 0, buf.length, start)
+    closeSync(fd)
+    text = buf
+      .toString("utf8")
+      .split("\n")
+      .filter((line) => {
+        const m = line.match(/^timestamp=(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/)
+        return m ? Date.parse(m[1]) >= since : false
+      })
+      .join("\n")
+  } catch { return [] }
+
+  const out = []
+  for (const line of text.split("\n")) {
+    if (!line.includes("normalization diagnostic")) continue
+    const m = line.match(/path=(\S+?)\.(\S+)\s+kind=(\S+)/)
+    if (!m) continue
+    const [, provider, key, kind] = m
+    if (!line.includes(`provider.${providerId}.`)) continue
+    if (kind !== "unsupported") continue
+    out.push(`${provider}.${key} (${kind})`)
+  }
+  return [...new Set(out)]
 }
 
 async function credits() {
@@ -124,6 +175,19 @@ if (cmd === "status" || cmd === "doctor") {
       console.log(c.y(`\n  ${drift.note}`))
       console.log(`  Fix it with:  opencode-cc-go sync`)
       if (h) bad = true
+    }
+
+    // OpenCode silently discards config keys it considers legacy, with only a
+    // log line to show for it. A top-level `reasoning` on a model is the case
+    // that bit this package: 75 warnings, zero effect, everything still "worked".
+    // Nothing in the config or the API response reveals it, so read the log.
+    const dropped = droppedConfigKeys()
+    if (dropped.length) {
+      console.log(c.y(`\n  OpenCode discarded ${dropped.length} unsupported config key(s):`))
+      for (const d of dropped.slice(0, 5)) console.log(`    ${d}`)
+      if (dropped.length > 5) console.log(c.d(`    …and ${dropped.length - 5} more`))
+      console.log(c.d("  Reinstall the provider to regenerate it:  opencode-cc-go install"))
+      bad = true
     }
     if (bad) process.exit(1)
     console.log(c.g("\n  all good"))

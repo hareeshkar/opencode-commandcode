@@ -24,8 +24,6 @@
     "parts.generated.json",
     "schema.generated.json",
     "scripts",
-    "scripts/install-service.sh",
-    "scripts/launchd.plist.template",
     "src",
     "test"
   ],

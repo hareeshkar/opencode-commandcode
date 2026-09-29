@@ -1101,10 +1101,41 @@ mystery:
 ```
 
 This is an OpenCode architecture constraint, not something this package can
-engineer around. The plugin path has no such window — its `config` hook calls
-`discoverPort()` during OpenCode's own startup, so the URL is correct before any
-request is made — but plugins do not initialise on every build (§11.1), which is
-exactly why the installer-plus-self-heal design exists.
+engineer around. The plugin path has no such window — it resolves the live port
+during OpenCode's own startup, so the URL is correct before any request is made —
+but it is the *secondary* path (§11.1.5). Provider registration lives in
+`opencode.json`, which is why the installer-plus-self-heal design exists and why
+a port change heals without a plugin being involved at all.
+
+#### A model entry's `reasoning` key is not top-level on v2
+
+The installer originally wrote reasoning models as:
+
+```json
+{ "reasoning": true, "options": { "reasoningEffort": "high" } }
+```
+
+v2 treats a top-level `reasoning` as a v1 leftover and **silently drops it**:
+
+```
+configuration normalization diagnostic
+  path=$.provider.commandcode.models.deepseek/deepseek-v4.1-flash.reasoning
+  kind=unsupported action="omitted unsupported legacy setting"
+```
+
+The correct shape puts it inside `options`:
+
+```json
+{ "options": { "reasoning": true, "reasoningEffort": "high" } }
+```
+
+This produced 75 warnings on a 49-model catalog and zero functional change —
+reasoning was never actually enabled. It is the same class of bug as the missing
+`parameters` in §14: the config parses, the request succeeds, and only a log
+line reveals that a setting was discarded. The check that catches it is to grep
+the server log for `normalization diagnostic` after installing; `opencode-cc-go
+doctor` now does this. (Three pre-existing warnings on the `meta` provider were
+found the same way and are not this package's to fix.)
 
 #### Why not just pin the port?
 
@@ -1202,56 +1233,119 @@ healthy `/health` immediately after.
 
 ## 11. OpenCode integration
 
-### 11.1 What was tried, and what the evidence said
+### 11.1 Plugin loading: what actually happens (corrected)
 
-**Approach A — plugin `config` hook.** The `Hooks` type exposes
-`config?: (input: Config) => Promise<void>`, and the provider loader comment
-says it reads config *after* plugins so hook mutations are included:
+**This section previously claimed that plugins "do not initialise" on v2.0.19.
+That was wrong, and the reasoning behind it was the mistake.**
 
-```ts
-// load plugins first so config() hook runs before reading cfg.provider
-const plugins = yield* plugin.list()
-const configProviders = Object.entries(cfg.provider ?? {})
-```
+The earlier version concluded the plugin loader never ran, because a probe
+plugin exported a bare `async function` and nothing appeared to happen. The
+correct conclusion was available at the time: the probe *was* loaded and *was*
+rejected. Nothing surfaces that rejection unless you read the server log.
 
-So the mechanism is correct. It is also implemented — `src/plugin.js` returns
-a `config` hook that injects the provider, and the injection is unit-verified:
-emulating OpenCode's own `applyPlugin` shows `config hook -> providers:
-["commandcode"]`.
-
-**But it does not fire in this environment.** Measured on opencode v2.0.19:
-
-| Attempt | Result |
-|---|---|
-| Plugin in `~/.config/opencode/plugins/*.js` | not loaded |
-| Plugin in `<project>/.opencode/plugins/*.js` | not loaded |
-| Plugin as `{"package":"./dir"}` (advisor's form) | not loaded |
-| Plugin as absolute path string | not loaded |
-| Plugin with `package.json` + `main` | not loaded |
-| `opencode run` and `opencode serve` | not loaded |
-| **The pre-existing, known-working advisor plugin** | **also not loaded** |
-
-The last row is the important one. A plugin that demonstrably worked before
-stopped loading too, so this is a property of the installed build, not of this
-package. Chasing it further would have been chasing a version-specific
-behaviour.
-
-**Approach B — write the provider into `opencode.json`.** Verified working:
+The log is at `~/.local/share/opencode/log/opencode.log` and every failure is
+recorded with a reference id:
 
 ```
-$ opencode run -m commandcode/deepseek/deepseek-v4.1-flash "Reply with only: E2E_OK"
-> build · deepseek/deepseek-v4.1-flash
-E2E_OK
+$ grep "failed to load plugin" ~/.local/share/opencode/log/opencode.log | tail -1
+... message="failed to load plugin" target=opencode-commandcode-go ref=err_268d84de \
+    cause="Cause([Fail(NpmInstallFailedError (cause: q_: 404 Not Found -
+    GET https://registry.npmjs.org/opencode-commandcode-go - Not found))])"
 ```
 
-Provider resolution is stable across builds, so this is the **primary path**.
-`scripts/install.js` is idempotent, preserves every other key, supports
-`--dry-run`, `--print` and `--remove`, and generates the model list from the
-discovered catalog so it cannot drift.
+That reference is what a UI `Reference: err_...` points at. It is always
+resolvable — do not infer a cause from the reference alone.
 
-**The plugin is still shipped.** It is correct, it is the better long-term
-mechanism, and it starts the bridge and provides the `commandcode_status` tool
-on builds where plugins do load.
+#### 11.1.1 The v2 module shape
+
+OpenCode v2 requires the default export to be an **object** with an `id` and a
+`setup` (or `effect`) function:
+
+```js
+export default { id: "...", async setup(ctx) { ... } }
+```
+
+Exporting a bare function — the shape of the v1 `Plugin` type — fails with:
+
+```
+PluginModule.LoadError: Plugin must export a default definition with an id and
+an effect or setup function. (cause: SchemaError(Expected object at ["default"]))
+```
+
+The three plugins already working in a stock config (`rtk`, `skillful`,
+`subagent-delegate`) are the reference implementation. Match them.
+
+#### 11.1.2 How a plugin gets referenced — and why a bare name 404s
+
+Two distinct mechanisms; mixing them up is easy:
+
+| Form | Mechanism | Notes |
+|---|---|---|
+| File in `~/.config/opencode/plugins/*.js` | auto-discovery | Simplest, most reliable |
+| Directory path in the `plugins` config array | file spec | resolves `package.json` `main` |
+| Bare npm name in the `plugins` array | **registry lookup** | 404s while unpublished |
+| File path in the `plugins` array | rejected | `configured plugin path must be a directory` |
+
+A `node_modules` symlink does **not** satisfy a bare name: the loader goes to
+`registry.npmjs.org` regardless of local presence. Until the package is
+published, use auto-discovery from `plugins/`.
+
+#### 11.1.3 Module caching — why a correct fix appears not to work
+
+Plugin modules are imported **once per server process** and cached by resolved
+path. Editing `plugin.js` while a server is running changes nothing: the old
+module stays in memory, the identical error is logged, and the fix looks wrong.
+
+This cost the most time here. Two symptoms, one cause:
+
+- the fix verified correct by importing the module in a fresh Node process,
+- and the error persisted verbatim, same `SchemaError`.
+
+A symlink makes it worse: the cache key is the *realpath*, so a stale entry
+survives edits and reinstalls. **Restart the OpenCode server after any plugin
+edit.** The desktop app respawns it, so changes land on the next respawn.
+
+#### 11.1.4 Registering a tool — four mistakes that all log "success"
+
+Each registered without error while being wrong. None is detectable except by
+asserting on the observable result.
+
+1. **There is no `ctx.tool.register`.** Assigning onto `ctx.tool` does nothing.
+   The v2 API registers through a draft editor:
+
+   ```js
+   await ctx.tool.transform((editor) => {
+     editor.add({ name, description, input, execute })
+   })
+   ```
+
+2. **`input` is a JSON Schema**, not the v1 `args` shorthand
+   (`{ detail: { type: "string", optional: true } }`).
+
+3. **Registration must happen before the first `await` in `setup`.** The tool
+   catalog is built from registrations made while `setup` still runs
+   synchronously. A transform registered *after* a multi-second bridge probe
+   resolved fine, logged `registered commandcode_status tool`, and the tool was
+   absent from a catalog of 60. Register first; do slow work after.
+
+4. **`execute` must return `{ content: string }`.** A bare string registers the
+   tool, then fails at call time:
+
+   ```
+   a is not an Object. (evaluating '"output"in a')
+   ```
+
+All four passed a "setup did not throw" check. The only reliable test is that
+the tool appears in an agent's tool list *and* that calling it returns content.
+
+#### 11.1.5 What the plugin is actually for
+
+Provider registration stays in `opencode.json`. It is deterministic,
+inspectable, version-independent, and survives any loader change. The plugin
+handles what config cannot: noticing the bridge is down, reporting
+plan/credits/schema/drift on demand, and keeping the provider `baseURL` pointed
+at the live port.
+
 
 ### 11.2 The plan gate — who this is for
 
@@ -1806,8 +1900,10 @@ Honest failure analysis, ordered by likelihood.
    `catalog.reachability.json` is gitignored precisely so it can be re-derived
    per account rather than shipped stale.
 
-5. **OpenCode's plugin loader.** The plugin is inert on builds where plugins do
-   not initialise. The installer is unaffected.
+5. **OpenCode's plugin loader.** The v2 module contract (`id` + `setup`) and the
+   tool-registration contract are both stricter than the v1 types suggest, and a
+   stale module cache makes correct fixes look broken (§11.1). None of it affects
+   the installer: the provider is in `opencode.json` either way.
 
 6. **Minimum CLI version rises.** The `upgrade_required` path is explicit and
    self-describing. Reading the version from the installed CLI means the fix is

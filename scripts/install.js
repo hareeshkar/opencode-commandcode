@@ -91,8 +91,12 @@ function buildProvider() {
       modalities: { input, output: ["text"] },
     }
     if (m.reasoningEfforts?.length) {
-      entry.reasoning = true
-      entry.options = { reasoningEffort: m.reasoningEfforts[0] }
+      // `reasoning` belongs INSIDE options on OpenCode v2. A top-level
+      // `reasoning` key is a v1 leftover and this build drops it with
+      //   "omitted unsupported legacy setting" (one WARN per model, 75 of them
+      //   on a 49-model catalog — so the setting silently never applied).
+      // Verified against the shape the bailian-token-plan provider uses.
+      entry.options = { reasoning: true, reasoningEffort: m.reasoningEfforts[0] }
     }
     models[m.id] = entry
   }
