@@ -127,10 +127,14 @@ function statusTool() {
       const parts = readArtifact("parts.generated.json", { inputModalitiesOverall: [] })
       const out = []
 
+      // NOTE: no early return when the bridge is down. The catalog, schema and
+      // modality facts below are read from files in this package, not from the
+      // bridge, so they are still true and still useful — and a status tool
+      // that reports nothing when the thing it reports on is broken is exactly
+      // backwards.
       if (!(await isUp(3000))) {
         const started = await ensureBridge()
         out.push(`bridge: ${started ? "restarted and healthy" : "UNREACHABLE (start failed)"}`)
-        if (!started) return { content: out.join("\n") }
       } else out.push("bridge: healthy")
 
       const base = await currentBaseURL()

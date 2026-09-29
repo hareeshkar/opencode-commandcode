@@ -1526,13 +1526,13 @@ model work".
 ## 12. Testing
 
 ```bash
-npm test                    # 51 live checks + 66 lifecycle checks
+npm test                    # 51 live checks + 68 lifecycle checks
 npm test -- --offline       # 27 structural + all 61 lifecycle, zero requests, zero credit
 npm test -- --model <id>    # override the model under test
 node test/lifecycle.mjs     # the lifecycle suite alone; also free
 ```
 
-**Current status: 51 live + 66 lifecycle passed, 0 failed.**
+**Current status: 51 live + 68 lifecycle passed, 0 failed.**
 
 The suite is split in two on purpose.
 
@@ -1572,7 +1572,7 @@ silently adopted the user's own bridge and "passed" while testing nothing.
 | 4. multi-turn | memory survives translation (plant `7391`, ask for it back) |
 | 5. tools | tool call emitted; **arguments round-trip exactly**; `finish_reason=tool_calls`; full agent loop consumes the tool result |
 | 6. vision | reads `42`, reads `green`, reads `red` from a real PNG |
-| 8. lifecycle | the 66 checks in §12.3, run in both live and `--offline` modes |
+| 8. lifecycle | the 68 checks in §12.3, run in both live and `--offline` modes |
 | 7. errors | missing model → 400 `invalid_request_error`; unknown route → 404 |
 
 ### 12.2 The vision fixture
@@ -1597,7 +1597,7 @@ Regenerate with `npm run fixture`.
 
 ### 12.3 What the lifecycle half covers
 
-66 checks over six groups. The organising question is one property: **a bridge
+68 checks over six groups. The organising question is one property: **a bridge
 is stopped if and only if we started it.** Everything else serves that, or
 serves "never leak a process or a port".
 

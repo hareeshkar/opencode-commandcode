@@ -405,7 +405,7 @@ bridge health on demand.
 ## Tests
 
 ```bash
-npm test                # 51 live checks + 66 offline lifecycle checks
+npm test                # 51 live checks + 68 offline lifecycle checks
 npm test -- --offline   # structure and lifecycle only — no API calls, no credit cost
 node test/lifecycle.mjs # the lifecycle suite on its own, also free
 ```

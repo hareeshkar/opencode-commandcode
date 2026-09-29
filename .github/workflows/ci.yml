@@ -53,8 +53,10 @@ jobs:
             const files = require('./pack.json')[0].files.map(f => f.path)
             const need = [
               'src/bridge.js','src/translate.js','src/plan.js','src/port.js',
+              'src/lifecycle.js','src/plugin.js',
               'bin/opencode-cc-go.js','catalog.json','schema.generated.json',
               'parts.generated.json','envelope.generated.json','README.md','LICENSE',
+              'test/run-all.mjs','test/lifecycle.mjs',
             ]
             const missing = need.filter(f => !files.includes(f))
             if (missing.length) { console.error('missing from tarball:', missing); process.exit(1) }

@@ -25,7 +25,7 @@
  */
 
 import { spawn } from "node:child_process"
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
@@ -119,6 +119,20 @@ const BRIDGE = path.join(REPO, "src", "bridge.js")
 
 console.log(C.bold("\n1. environment classification"))
 
+// Every case supplies its own home and env, so the suite behaves identically on
+// a developer machine that has Command Code credentials and in CI that does
+// not. A test that depends on the developer's ~/.commandcode/auth.json is not a
+// test, it is a machine check — and it is why the first version of this file
+// failed in CI for the right reason.
+function fakeHome(withCreds = true) {
+  const home = scratchDir()
+  if (withCreds) {
+    mkdirSync(path.join(home, ".commandcode"), { recursive: true })
+    writeFileSync(path.join(home, ".commandcode", "auth.json"), JSON.stringify({ apiKey: "test-key" }))
+  }
+  return home
+}
+
 const ENV_CASES = [
   // name,                          opts,                                                       expect kind
   ["desktop, creds, writable home", { env: { COMMAND_CODE_API_KEY: "k" }, hasCredentials: true, configWritable: true }, "local"],
@@ -128,8 +142,9 @@ const ENV_CASES = [
   ["CI runner",                     { env: { CI: "true", COMMAND_CODE_API_KEY: "k" }, hasCredentials: true, configWritable: true }, "cloud"],
   ["OPENCODE_CLOUD=1",              { env: { OPENCODE_CLOUD: "1", COMMAND_CODE_API_KEY: "k" }, hasCredentials: true, configWritable: true }, "cloud"],
   ["no creds anywhere",             { env: {}, hasCredentials: false, configWritable: true }, "cloud"],
-  ["credentials from env",          { env: { COMMAND_CODE_API_KEY: "k" }, configWritable: true }, "local"],
-  ["credentials from auth.json",    { env: {}, home: os.homedir(), configWritable: true }, "local"],
+  ["credentials from env",          { env: { COMMAND_CODE_API_KEY: "k" }, configWritable: true, home: fakeHome(false) }, "local"],
+  ["credentials from auth.json",    { env: {}, configWritable: true, home: fakeHome(true) }, "local"],
+  ["auth.json without a key",       { env: {}, configWritable: true, home: fakeHome(false) }, "cloud"],
   ["home does not exist",           { env: {}, home: "/nonexistent-home-xyz", configWritable: true }, "cloud"],
 ]
 
@@ -150,22 +165,32 @@ for (const [name, opts, expect] of ENV_CASES) {
 
 // REGRESSION: the writability probe wrote into a directory it never created, so
 // it always threw, every machine was classified as an ephemeral sandbox, and a
-// real desktop silently lost detach and config-drift repair. Found by reading
-// the plugin's own log on a live machine, not by a failing test — the reason
-// these two cases assert on a real filesystem rather than a stub.
+// real desktop silently lost detach and config-drift repair.
+//
+// Found by reading the plugin's log on a live machine, not by a failing test.
+// These assertions therefore run against a real filesystem rather than a stub —
+// a probe only ever exercised with injected values is not testing the probe.
 {
-  const real = L.detectEnvironment({ env: {} })
-  ok("this machine's real home is detected as writable", real.configWritable === true)
-  ok("a machine with creds and a writable home is 'local', not 'cloud'",
+  // Real home, but credentials supplied explicitly so the result does not
+  // depend on whether the developer has logged in.
+  const real = L.detectEnvironment({ env: { COMMAND_CODE_API_KEY: "k" } })
+  ok("a real writable home is detected as writable", real.configWritable === true)
+  ok("creds + a real writable home is 'local', not 'cloud'",
     real.kind === "local", `got ${real.kind} — reasons: ${real.reasons.join("; ")}`)
   ok("the probe does not leave a directory behind", !existsSync(path.join(os.homedir(), ".commandcode-go-probe")))
 
-  const tmpHome = mkdtempSync(path.join(os.tmpdir(), "ccgo-home-"))
-  scratch.push(tmpHome)
-  const onTmp = L.detectEnvironment({ env: { COMMAND_CODE_API_KEY: "k" }, home: tmpHome })
-  ok("a fresh temp home with an env key is 'local'", onTmp.kind === "local", `got ${onTmp.kind}`)
+  const tmpHome = fakeHome(true)
+  const onTmp = L.detectEnvironment({ env: {}, home: tmpHome })
+  ok("a fresh writable home with auth.json is 'local'", onTmp.kind === "local", `got ${onTmp.kind}`)
   ok("a nonexistent home is 'cloud' (nothing can be persisted)",
     L.detectEnvironment({ env: { COMMAND_CODE_API_KEY: "k" }, home: "/nonexistent-xyz" }).kind === "cloud")
+
+  // The exact regression: home that is real and writable, and a probe that
+  // creates what it writes into.
+  const probeHome = fakeHome(true)
+  ok("the writability probe creates and removes its own directory",
+    L.detectEnvironment({ env: { COMMAND_CODE_API_KEY: "k" }, home: probeHome }).configWritable === true &&
+    !existsSync(path.join(probeHome, ".commandcode-go-probe")))
 }
 
 // ------------------------------------------------------- 2. ownership rules
@@ -357,7 +382,7 @@ L._resetOwnership()
     ok("the foreign listener is untouched", await squatterStillUp(p))
     await L.stop({ graceMs: 3000 })
   } else {
-    ok("bridge declines rather than crashing when the port is taken", false, r.reason)
+    skip("foreign port", `bridge could not start here: ${r.reason}`)
   }
   foreign.close()
   await sleep(150)
