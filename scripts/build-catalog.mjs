@@ -46,8 +46,24 @@ function cliVersion() {
 
 const VERSION = cliVersion()
 
+// Generous, because a cold free-tier model can queue behind other traffic.
+// 45 s was not always enough, and a timeout must never be read as a denial.
+const PROBE_TIMEOUT_MS = 90_000
+const PROBE_RETRIES = 2
+
 // Minimal, schema-correct /alpha/generate call. We deliberately ask the model
 // to emit one token so the probe is as cheap as possible.
+//
+// A probe has THREE possible outcomes, not two. Conflating a timeout with a
+// denial is a real bug this file had: `stealth/pixel-canary` is advertised as
+// free on the Go plan, and it was dropped from the catalog because the request
+// exceeded the 45 s budget and the abort was recorded as "not reachable". A
+// model we failed to hear from is not a model we were told no to.
+//
+//   reachable  -> 200, keep
+//   denied     -> 4xx with an explicit plan message, drop (the API is
+//                 authoritative and names the tier that would unlock it)
+//   unknown    -> timed out or transport error, keep, but say so
 async function probeModel(id, key) {
   const body = {
     config: {
@@ -76,7 +92,7 @@ async function probeModel(id, key) {
     },
   }
   const ctl = new AbortController()
-  const t = setTimeout(() => ctl.abort(), 45_000)
+  const t = setTimeout(() => ctl.abort(), PROBE_TIMEOUT_MS)
   try {
     const r = await fetch("https://api.commandcode.ai/alpha/generate", {
       method: "POST",
@@ -94,13 +110,17 @@ async function probeModel(id, key) {
       const t2 = await r.text().catch(() => "")
       let m = ""
       try { m = JSON.parse(t2).error?.message || "" } catch {}
-      return { reachable: false, status: r.status, reason: m.slice(0, 160) }
+      // A 4xx carrying a plan message is an authoritative denial: the API names
+      // the tier that would unlock it. Only this class may remove a model.
+      return { reachable: false, denied: true, status: r.status, reason: m.slice(0, 160) }
     }
     // drain
     for await (const _ of r.body) { /* consume */ }
     return { reachable: true, status: 200 }
   } catch (e) {
-    return { reachable: false, status: 0, reason: String(e.message).slice(0, 160) }
+    // Timed out or transport failure. We learned nothing about this model's
+    // entitlement, so it must not be treated as a denial.
+    return { reachable: false, denied: false, timedOut: e?.name === "AbortError", status: 0, reason: String(e?.message || e).slice(0, 160) }
   } finally {
     clearTimeout(t)
   }
@@ -116,10 +136,19 @@ if (process.argv.includes("--probe")) {
   process.stderr.write(`probing ${list.length} models against /alpha/generate...\n`)
   // sequential: parallel requests would trip the 5h window limiter
   for (const [i, m] of list.entries()) {
-    const res = await probeModel(m.id, key)
+    let res = await probeModel(m.id, key)
+    // Retry only inconclusive outcomes. A denial is deterministic — retrying it
+    // just spends time to learn the same thing.
+    for (let attempt = 1; attempt <= PROBE_RETRIES && !res.reachable && !res.denied; attempt++) {
+      process.stderr.write(`        retry ${attempt}/${PROBE_RETRIES} (inconclusive)\\n`)
+      await new Promise((r) => setTimeout(r, 1500 * attempt))
+      res = await probeModel(m.id, key)
+    }
     cache[m.id] = res
     process.stderr.write(
-      `  [${String(i + 1).padStart(2)}/${list.length}] ${res.reachable ? "OK  " : "BLOCK"} ${m.id}\n`,
+      `  [${String(i + 1).padStart(2)}/${list.length}] ${
+        res.reachable ? "OK  " : res.denied ? "BLOCK" : "SLOW "
+      } ${m.id}${res.reachable || res.denied ? "" : "  (kept: inconclusive)"}\n`,
     )
   }
   writeFileSync(CACHE, JSON.stringify({ probedAt: new Date().toISOString(), cliVersion: VERSION, results: cache }, null, 2))
@@ -141,7 +170,10 @@ const offline = Object.keys(reach).length === 0
 const DEFAULT_CONTEXT = Number(process.env.CMD_DEFAULT_CONTEXT || 128000)
 
 const models = extracted.models
-  .filter((m) => offline || reach[m.id]?.reachable)
+  // Keep anything we did not get an authoritative denial for. Only a 4xx with a
+// plan message removes a model. An inconclusive probe keeps it, because hiding
+// a model that works is worse than offering one that might not.
+  .filter((m) => offline || !reach[m.id]?.denied)
   .map((m) => ({
     id: m.id,
     name: m.name,

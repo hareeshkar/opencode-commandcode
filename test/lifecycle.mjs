@@ -25,7 +25,7 @@
  */
 
 import { spawn } from "node:child_process"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
@@ -397,7 +397,51 @@ L._resetOwnership()
   }
 }
 
-// ------------------------------------------------------ 6. plugin contract
+// ------------------------------------------- 6. catalog reachability rules
+
+console.log(C.bold("\n6. catalog reachability: deny vs unknown"))
+
+// REGRESSION: the probe recorded an AbortError exactly like a 403, so
+// `stealth/pixel-canary` — advertised as free on the Go plan — was dropped from
+// the catalog because its request exceeded the 45 s budget. A model we failed to
+// hear from is not a model we were told no to.
+//
+// These run offline against the recorded probe output plus the classification
+// rule itself, so no API call is needed to catch a repeat.
+{
+  const reach = JSON.parse(readFileSync(path.join(REPO, "catalog.reachability.json"), "utf8")).results
+  const catalog = JSON.parse(readFileSync(path.join(REPO, "catalog.json"), "utf8")).models
+  const inCatalog = new Set(catalog.map((m) => m.id))
+
+  const timedOut = Object.entries(reach).filter(([, v]) => !v.reachable && !v.denied)
+  ok("the probe now distinguishes a denial from an inconclusive result",
+    timedOut.every(([, v]) => v.denied === false && v.timedOut === true),
+    `${timedOut.length} inconclusive result(s) recorded`)
+
+  const denied = Object.entries(reach).filter(([, v]) => v.denied)
+  ok("every denied model carries an explicit plan message", denied.every(([, v]) => /retired|MODEL_NOT_IN_PLAN|no longer available/.test(v.reason || "")))
+
+  // The rule that actually matters, asserted against the shipped artifacts.
+  const wronglyDropped = Object.keys(reach).filter((id) => !inCatalog.has(id) && !reach[id].denied)
+  ok("no model is missing from the catalog without an authoritative denial",
+    wronglyDropped.length === 0, wronglyDropped.join(", "))
+  ok("no catalog entry was recorded as unreachable",
+    catalog.every((m) => reach[m.id]?.reachable !== false))
+
+  // The specific regression: a free-tier model the probe used to time out on.
+  ok("stealth/pixel-canary is in the shipped catalog",
+    inCatalog.has("stealth/pixel-canary"))
+  ok("it is flagged vision-capable",
+    catalog.find((m) => m.id === "stealth/pixel-canary")?.inputModalities?.includes("image") === true)
+
+  // Retired free SKUs are excluded; their paid replacements are present.
+  ok("the retired free SKUs stay out of the catalog",
+    !inCatalog.has("inclusionai/ling-3.0-flash-free") && !inCatalog.has("tencent/Hy3"))
+  ok("the paid replacement for the retired free Hy3 is present",
+    inCatalog.has("tencent/hy3-paid"))
+}
+
+// ------------------------------------------------- 7. plugin contract (v2)
 
 console.log(C.bold("\n6. plugin contract (v2)"))
 

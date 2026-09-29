@@ -104,6 +104,26 @@ anything.** It authenticates with the same key the CLI uses, sends the same
 headers, and is metered against the same credits. A full test run costs about
 0.02 credits.
 
+**Discovery is free in the sense that matters, but not in the sense you might
+assume.** A *validation* error never reaches a model, so brute-forcing the schema
+costs nothing. A **successful** probe does consume a request and counts against
+the 5-hour window. A full 67-model sweep saturates the 3-unit 5h allowance by
+itself — mine did, and the live suite then returned 429 three times. Probe
+selectively, or budget a cooldown before re-running the live tests.
+
+### Slow free-tier models
+
+`stealth/pixel-canary` is reachable but slow — queued behind paid traffic. The
+first call returned HTTP 200 in 15 s with a real completion; a follow-up sat past
+240 s. Treat free-tier models as usable, not as fast.
+
+It is also a **reasoning model**: at `max_tokens: 40` it spent the entire budget
+thinking and returned `content: null` with `finish_reason: "length"`. Reasoning
+models need a real output budget (≥1200) or they answer with nothing at all.
+
+This is precisely why the reachability probe originally dropped it — see
+§12.5 for the probe bug that hid it.
+
 ---
 
 ## 3. How the $1 plan was unlocked
@@ -377,7 +397,7 @@ records the verdict:
 Deliberately tiny: 16 output tokens, one-word prompt. Probes run **sequentially**
 — parallel requests trip the rolling window limiter.
 
-Result: **49 of 67 reachable.** The 18 blocked ones fall into two clean groups:
+Result: **50 of 67 reachable.** The 17 blocked ones fall into two clean groups:
 
 *Plan-gated (premium tiers)*
 ```
@@ -402,6 +422,22 @@ tencent/Hy3                      "The free Tencent Hy3 tier was retired on July 
 That distinction matters: a retired model will *never* come back, while a
 plan-gated one becomes available on upgrade. `catalog.reachability.json`
 records the raw reason string so the difference survives.
+
+**Retired free SKUs have separate replacement ids, and the CLI still lists the
+dead ones.** This is the trap that makes a plan look broken when it is fine:
+
+| dead id | replacement | in your catalog? |
+|---|---|---|
+| `tencent/Hy3` (free tier retired Jul 21 2026) | `tencent/hy3-paid` | yes |
+| `minimax/minimax-m3-free`, `minimax-m2.7-free` (retired) | `MiniMaxAI/MiniMax-M3`, `MiniMaxAI/MiniMax-M2.7` | yes |
+| `inclusionai/ling-3.0-flash-free` (deal ended Aug 3) | none found | no |
+
+So you *do* still have Hy3 — under `tencent/hy3-paid`. The dead id is what the
+old catalog carried, which is why it looked like a missing model.
+
+**`stealth/pixel-canary` was missing for a completely different reason: our own
+probe.** See §12.5. It is free, reachable, vision-capable, and now in the
+catalog — 50 rather than 49.
 
 The reachability file is **gitignored** — it describes one account's plan and
 would leak which tier you are on.
@@ -679,7 +715,7 @@ format has no door for it.
 
 ### 7.2 What each *model* supports
 
-From `catalog.json` — 30 of 49 reachable models accept images; 19 are
+From `catalog.json` — 31 of 50 reachable models accept images; 19 are
 text-only:
 
 | Model | Input | Context |
@@ -1526,13 +1562,13 @@ model work".
 ## 12. Testing
 
 ```bash
-npm test                    # 51 live checks + 68 lifecycle checks
+npm test                    # 51 live checks + 76 lifecycle checks
 npm test -- --offline       # 27 structural + all 61 lifecycle, zero requests, zero credit
 npm test -- --model <id>    # override the model under test
 node test/lifecycle.mjs     # the lifecycle suite alone; also free
 ```
 
-**Current status: 51 live + 68 lifecycle passed, 0 failed.**
+**Current status: 51 live + 76 lifecycle passed, 0 failed.**
 
 The suite is split in two on purpose.
 
@@ -1583,7 +1619,7 @@ silently adopted the user's own bridge and "passed" while testing nothing.
 | 4. multi-turn | memory survives translation (plant `7391`, ask for it back) |
 | 5. tools | tool call emitted; **arguments round-trip exactly**; `finish_reason=tool_calls`; full agent loop consumes the tool result |
 | 6. vision | reads `42`, reads `green`, reads `red` from a real PNG |
-| 8. lifecycle | the 68 checks in §12.3, run in both live and `--offline` modes |
+| 8. lifecycle | the 76 checks in §12.3, run in both live and `--offline` modes |
 | 7. errors | missing model → 400 `invalid_request_error`; unknown route → 404 |
 
 ### 12.2 The vision fixture
@@ -1608,7 +1644,7 @@ Regenerate with `npm run fixture`.
 
 ### 12.3 What the lifecycle half covers
 
-68 checks over six groups. The organising question is one property: **a bridge
+76 checks over seven groups. The organising question is one property: **a bridge
 is stopped if and only if we started it.** Everything else serves that, or
 serves "never leak a process or a port".
 
@@ -1642,6 +1678,38 @@ for transport testing — the bridge's job is to move bytes faithfully, not to b
 smart. Override with `--model` if you want to verify a specific model.
 
 ### 12.5 Test-harness pitfalls worth knowing
+
+**A timeout is not a denial.** The reachability probe had two outcomes —
+reachable and not reachable — and recorded an `AbortError` exactly like a 403.
+`stealth/pixel-canary` is advertised as free on the Go plan and was dropped from
+the shipped catalog because its probe exceeded the 45 s budget. A model we failed
+to hear from is not a model we were told no to.
+
+The fix gives the probe **three** outcomes, and only one of them may remove a
+model:
+
+| outcome | signal | effect |
+|---|---|---|
+| reachable | HTTP 200 | keep |
+| **denied** | 4xx carrying a plan message | drop — the API is authoritative and names the tier that would unlock it |
+| **unknown** | timeout / transport error | keep, and say so |
+
+Plus a 90 s budget and two retries on *inconclusive* outcomes only — a denial is
+deterministic, so retrying it just spends time to learn the same thing.
+
+The 403 bodies are unusually good error messages, which is what makes the
+denied/unknown split safe to automate on. Each names the tier:
+
+```
+MODEL_NOT_IN_PLAN: Gemini 3.8 Flash available in GOAT and above plans
+The free Tencent Hy3 tier was retired on July 21, 2026. Hy3 is back as a paid
+  model — pick Tencent Hy3 (tencent/hy3-paid)
+Ling 3.0 Flash Free is no longer available. Free model deal ended by August 3rd
+```
+
+That third one matters beyond the probe: retired free SKUs are still listed by
+the CLI, and the replacements are separate ids. The catalog correctly excludes
+`tencent/Hy3` and includes `tencent/hy3-paid`, which is how you still get Hy3.
 
 **The AI SDK can strip tool schemas.** In `@ai-sdk/openai-compatible@2.0.80`
 with `ai@6.0.296`, a tool's `parameters` can arrive at the bridge as

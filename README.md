@@ -1,6 +1,6 @@
 # opencode-commandcode-go
 
-**Use your $1 Command Code GO plan inside OpenCode. 49 models. Real vision. Real tool use.**
+**Use your $1 Command Code GO plan inside OpenCode. 50 models. Real vision. Real tool use.**
 
 ---
 
@@ -96,7 +96,7 @@ server that **speaks the same language**, then teaches OpenCode to talk to it.
 
 The result:
 
-- ✅ All **49 models** your plan can reach, listed automatically
+- ✅ All **50 models** your plan can reach, listed automatically
 - ✅ **30 of them accept images** — and OpenCode routes image prompts to those
 - ✅ **Full tool use** — the agent can read, write and run shell commands
 - ✅ Streaming, reasoning output, and accurate token accounting
@@ -154,11 +154,11 @@ opencode-commandcode
   upstream      reachable  https://api.commandcode.ai
   account       your-username
   cli version   1.69.0
-  catalog       49 models (2026-09-29)
+  catalog       50 models (2026-09-30)
   schema        38 paths (2026-09-29)
   credits       9.90 / 10 this cycle
   modalities    document, image, pdf, text
-  vision models 30 of 49
+  vision models 31 of 50
 ```
 
 ---
@@ -265,11 +265,11 @@ opencode run -m commandcode/deepseek/deepseek-v4.1-flash "hello"
 
 ## What you get
 
-### 49 models, discovered automatically
+### 50 models, discovered automatically
 
 The list isn't a hardcoded list someone typed out in 2024. The package reads
 Command Code's own model catalog, then **probes every model** to see which ones
-your plan can actually call. Right now that's 49 of 67, because your plan
+your plan can actually call. Right now that's 50 of 67, because your plan
 correctly hides the Google/Gemini, Meta and xAI premium tiers.
 
 ```
@@ -405,7 +405,7 @@ bridge health on demand.
 ## Tests
 
 ```bash
-npm test                # 51 live checks + 68 offline lifecycle checks
+npm test                # 51 live checks + 76 offline lifecycle checks
 npm test -- --offline   # structure and lifecycle only — no API calls, no credit cost
 node test/lifecycle.mjs # the lifecycle suite on its own, also free
 ```
